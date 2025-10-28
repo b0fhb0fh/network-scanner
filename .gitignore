@@ -1,0 +1,15 @@
+__pycache__/
+.env
+*.sqlite
+*.db
+.db/
+*.log
+*.tgz
+export/
+export_dos/
+*.xml
+*.txt
+venv/
+.envrc
+.idea/
+.vscode/
