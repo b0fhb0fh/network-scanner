@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Iterable
 
 from network_scanner.config.settings import Settings
-from network_scanner.db.dao import create_sqlite_engine, get_session, init_db, get_tenant_by_name
+from network_scanner.db.dao import create_sqlite_engine, get_session, init_db, get_tenant_by_name, get_tenant_ports
 from network_scanner.db.models import Scan, Host, Service
 from network_scanner.parsers.nmap_xml import parse_nmap_xml_into_db
 
@@ -39,9 +39,28 @@ def run_scan_for_tenant(settings: Settings, tenant_name: str, mode: str = "tcp")
         if not targets:
             scan.status = "failed"
             raise ValueError("No networks configured for this tenant")
-        ports_arg = "1-65535"
-        if mode == "all":
-            ports_arg = "1-65535,U:53,69,123,161"
+        # Per-tenant port configuration (overrides defaults if present)
+        cfg = get_tenant_ports(s, tenant)
+        if cfg and (cfg.tcp_ports or cfg.udp_ports):
+            tcp_part = cfg.tcp_ports.strip() if cfg.tcp_ports else None
+            udp_part = cfg.udp_ports.strip() if cfg.udp_ports else None
+            parts: list[str] = []
+            if tcp_part:
+                parts.append(tcp_part)
+            if udp_part:
+                parts.append(f"U:{udp_part}")
+            ports_arg = ",".join(parts) if parts else "1-65535"
+        else:
+            # Use defaults from settings if provided; otherwise legacy defaults
+            if settings.tcp_ports_default or settings.udp_ports_default:
+                parts: list[str] = []
+                if settings.tcp_ports_default:
+                    parts.append(settings.tcp_ports_default)
+                if settings.udp_ports_default:
+                    parts.append(f"U:{settings.udp_ports_default}")
+                ports_arg = ",".join(parts) if parts else "1-65535"
+            else:
+                ports_arg = "1-65535" if mode == "tcp" else "1-65535,U:53,69,123,161"
 
         # Use python-masscan to perform the fast scan
         mas = masscan.PortScanner()

@@ -4,7 +4,6 @@ from pathlib import Path
 from typing import Optional
 
 from lxml import etree
-from sqlalchemy import select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
@@ -22,26 +21,6 @@ def _is_good(ip: str, proto: str, port: int, session: Session) -> bool:
     # Placeholder for future per-tenant good lists in DB
     return False
 
-
-def _is_danger(service_name: str, proto: str, port: int, session: Session) -> bool:
-    danger_services = {
-        ("ftp", "tcp", 21),
-        ("telnet", "tcp", 23),
-        ("finger", "tcp", 79),
-        ("snmp", "udp", 161),
-        ("tftp", "udp", 69),
-        ("mysql", "tcp", 3306),
-        ("mssql", "tcp", 1433),
-        ("postgres", "tcp", 5432),
-        ("oracle", "tcp", 1521),
-        ("microsoft-ds", "tcp", 445),
-        ("netbios-ssn", "tcp", 139),
-        ("nfs", "tcp", 2049),
-        ("portmapper", "tcp", 111),
-        ("microsoft-rdp", "tcp", 3389),
-    }
-    key = (service_name or "", proto, port)
-    return key in danger_services
 
 
 def parse_nmap_xml_into_db(engine: Engine, xml_path: Path, scan_id: int) -> None:
@@ -90,7 +69,7 @@ def parse_nmap_xml_into_db(engine: Engine, xml_path: Path, scan_id: int) -> None
                     version=version or None,
                     extrainfo=extrainfo or None,
                     good=1 if _is_good(ip, proto, port_num, s) else 0,
-                    danger=1 if _is_danger(name, proto, port_num, s) else 0,
+                    danger=0,
                 )
                 s.add(sv)
 

@@ -27,6 +27,8 @@ class Tenant(Base):
     description: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
 
     networks: Mapped[list[Network]] = relationship("Network", back_populates="tenant", cascade="all, delete-orphan")
+    # optional one-to-one with ports config
+    
 
 
 class Network(Base):
@@ -41,6 +43,17 @@ class Network(Base):
     __table_args__ = (
         UniqueConstraint("tenant_id", "cidr", name="uq_network_tenant_cidr"),
     )
+
+
+class TenantPorts(Base):
+    __tablename__ = "tenant_ports"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False, unique=True, index=True)
+    tcp_ports: Mapped[Optional[str]] = mapped_column(String(4096), nullable=True)  # comma-separated
+    udp_ports: Mapped[Optional[str]] = mapped_column(String(4096), nullable=True)  # comma-separated
+
+    tenant: Mapped[Tenant] = relationship("Tenant")
 
 
 class Scan(Base):

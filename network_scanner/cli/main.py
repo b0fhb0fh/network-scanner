@@ -26,6 +26,8 @@ from network_scanner.db.dao import (
     list_scans,
     get_scan_by_id,
     delete_scan,
+    get_tenant_ports,
+    set_tenant_ports,
 )
 
 
@@ -195,6 +197,44 @@ def delete_scan_cmd(ctx: click.Context, scan_id: int, yes: bool) -> None:  # typ
             sys.exit(1)
         delete_scan(s, sc)
         console.print(f"Deleted scan id={scan_id}")
+
+
+@cli.command()
+@click.option("--tenant", required=True, help="Tenant name")
+@click.option("--tcp", required=False, default=None, help="Comma-separated TCP ports or ranges, e.g. 22,80,443,1-1024")
+@click.option("--udp", required=False, default=None, help="Comma-separated UDP ports or ranges, e.g. 53,123,161")
+@click.pass_context
+def set_ports_cmd(ctx: click.Context, tenant: str, tcp: Optional[str], udp: Optional[str]) -> None:  # type: ignore[override]
+    settings: Settings = ctx.obj["settings"]
+    engine = create_sqlite_engine(settings.sqlite_path)
+    init_db(engine)
+    with get_session(engine) as s:
+        t = get_tenant_by_name(s, tenant)
+        if not t:
+            console.print(f"Tenant '{tenant}' not found", style="red")
+            sys.exit(1)
+        cfg = set_tenant_ports(s, t, tcp_ports=(tcp or None), udp_ports=(udp or None))
+        console.print(f"Set ports for tenant '{t.name}': tcp='{cfg.tcp_ports or ''}' udp='{cfg.udp_ports or ''}'")
+
+
+@cli.command()
+@click.option("--tenant", required=True, help="Tenant name")
+@click.pass_context
+def show_ports_cmd(ctx: click.Context, tenant: str) -> None:  # type: ignore[override]
+    settings: Settings = ctx.obj["settings"]
+    engine = create_sqlite_engine(settings.sqlite_path)
+    with get_session(engine) as s:
+        t = get_tenant_by_name(s, tenant)
+        if not t:
+            console.print(f"Tenant '{tenant}' not found", style="red")
+            sys.exit(1)
+        cfg = get_tenant_ports(s, t)
+        table = Table(title=f"Ports for {t.name}")
+        table.add_column("Protocol")
+        table.add_column("Ports")
+        table.add_row("TCP", cfg.tcp_ports or "(default)") if cfg else table.add_row("TCP", "(default)")
+        table.add_row("UDP", cfg.udp_ports or "(default)") if cfg else table.add_row("UDP", "(default)")
+        console.print(table)
 @cli.command()
 @click.pass_context
 def list_tenants_cmd(ctx: click.Context) -> None:  # type: ignore[override]

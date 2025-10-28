@@ -8,7 +8,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
-from .models import Base, Tenant, Network, Scan, Host, Service
+from .models import Base, Tenant, Network, Scan, Host, Service, TenantPorts
 
 
 def create_sqlite_engine(db_path: Path) -> Engine:
@@ -107,4 +107,22 @@ def get_scan_by_id(session: Session, scan_id: int) -> Scan | None:
 def delete_scan(session: Session, scan: Scan) -> None:
     session.delete(scan)
     session.flush()
+
+
+# --- Per-tenant ports configuration ---
+
+def get_tenant_ports(session: Session, tenant: Tenant) -> TenantPorts | None:
+    return session.scalar(select(TenantPorts).where(TenantPorts.tenant_id == tenant.id))
+
+
+def set_tenant_ports(session: Session, tenant: Tenant, *, tcp_ports: str | None, udp_ports: str | None) -> TenantPorts:
+    cfg = get_tenant_ports(session, tenant)
+    if cfg is None:
+        cfg = TenantPorts(tenant_id=tenant.id)
+        session.add(cfg)
+        session.flush()
+    cfg.tcp_ports = tcp_ports
+    cfg.udp_ports = udp_ports
+    session.flush()
+    return cfg
 
