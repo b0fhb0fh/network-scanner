@@ -61,3 +61,50 @@ def list_networks(session: Session, tenant: Tenant | None = None) -> list[Networ
     return list(session.scalars(stmt.order_by(Network.tenant_id, Network.cidr)))
 
 
+# --- Update/Delete helpers ---
+
+def update_tenant(session: Session, tenant: Tenant, *, name: str | None = None, description: str | None = None) -> Tenant:
+    if name is not None:
+        tenant.name = name
+    if description is not None:
+        tenant.description = description
+    session.flush()
+    return tenant
+
+
+def delete_tenant(session: Session, tenant: Tenant) -> None:
+    session.delete(tenant)
+    session.flush()
+
+
+def get_network_by_id(session: Session, network_id: int) -> Network | None:
+    return session.get(Network, network_id)
+
+
+def update_network(session: Session, network: Network, *, cidr: str | None = None) -> Network:
+    if cidr is not None:
+        network.cidr = cidr
+    session.flush()
+    return network
+
+
+def delete_network(session: Session, network: Network) -> None:
+    session.delete(network)
+    session.flush()
+
+
+def list_scans(session: Session, tenant: Tenant | None = None) -> list[Scan]:
+    stmt = select(Scan)
+    if tenant:
+        stmt = stmt.where(Scan.tenant_id == tenant.id)
+    return list(session.scalars(stmt.order_by(Scan.started_at.desc())))
+
+
+def get_scan_by_id(session: Session, scan_id: int) -> Scan | None:
+    return session.get(Scan, scan_id)
+
+
+def delete_scan(session: Session, scan: Scan) -> None:
+    session.delete(scan)
+    session.flush()
+
