@@ -95,7 +95,7 @@ def run_scan_for_tenant(settings: Settings, tenant_name: str, mode: str = "tcp")
 
             nmap_args: list[str] = [settings.nmap_path, "--open", "-n", "-PN", "-oX", str(date_dir / "nmap.xml")]
             if tcp_ports:
-                nmap_args += ["-p", f"T:{','.join(str(p) for p in sorted(tcp_ports))}" + (f"U:{','.join(str(p) for p in sorted(udp_ports))}" if udp_ports else "")]
+                nmap_args += ["-p", f"T:{','.join(str(p) for p in sorted(tcp_ports))}" + (f",U:{','.join(str(p) for p in sorted(udp_ports))}" if udp_ports else "")]
                 nmap_args = [settings.nmap_path, "-sS", "-sU", *nmap_args[2:]] if udp_ports else [settings.nmap_path, "-sS", *nmap_args[2:]]
             elif udp_ports:
                 nmap_args = [settings.nmap_path, "-sU", "--open", "-n", "-PN", "-oX", str(date_dir / "nmap.xml"), "-p", f"U:{','.join(str(p) for p in sorted(udp_ports))}"]
