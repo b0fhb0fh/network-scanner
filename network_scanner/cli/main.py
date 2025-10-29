@@ -234,9 +234,10 @@ def list_scans_cmd(ctx: click.Context, tenant: Optional[str]) -> None:  # type: 
         table.add_column("Started")
         table.add_column("Finished")
         for sc in scans:
+            tenant_name = t.name if t else (sc.tenant.name if getattr(sc, "tenant", None) else "(deleted)")
             table.add_row(
                 str(sc.id),
-                (t.name if t else sc.tenant.name),
+                tenant_name,
                 sc.mode,
                 sc.status,
                 _fmt_dt(sc.started_at),

@@ -4,7 +4,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, select, event
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
@@ -12,7 +12,19 @@ from .models import Base, Tenant, Network, Scan, Host, Service, TenantPorts
 
 
 def create_sqlite_engine(db_path: Path) -> Engine:
-    return create_engine(f"sqlite:///{db_path}", echo=False, future=True)
+    engine = create_engine(f"sqlite:///{db_path}", echo=False, future=True)
+
+    # Ensure SQLite enforces foreign key constraints (required for ON DELETE CASCADE)
+    @event.listens_for(engine, "connect")
+    def _set_sqlite_pragma(dbapi_connection, connection_record):  # type: ignore[unused-argument]
+        try:
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.close()
+        except Exception:
+            pass
+
+    return engine
 
 
 def init_db(engine: Engine) -> None:
