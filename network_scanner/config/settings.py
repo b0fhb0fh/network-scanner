@@ -12,7 +12,6 @@ class Settings:
     rate: int = 2048
     nmap_path: str = "nmap"
     tcp_ports_default: Optional[str] = None
-    udp_ports_default: Optional[str] = None
 
     @staticmethod
     def load(config_path: Optional[str] = None) -> "Settings":
@@ -42,8 +41,6 @@ class Settings:
                 settings.nmap_path = str(cfg["nmap_path"])  # type: ignore[assignment]
             if "tcp_ports_default" in cfg:
                 settings.tcp_ports_default = (cfg["tcp_ports_default"].strip() or None)  # type: ignore[assignment]
-            if "udp_ports_default" in cfg:
-                settings.udp_ports_default = (cfg["udp_ports_default"].strip() or None)  # type: ignore[assignment]
         settings.data_dir.mkdir(parents=True, exist_ok=True)
         return settings
 

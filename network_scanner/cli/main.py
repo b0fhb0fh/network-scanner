@@ -9,6 +9,7 @@ from rich.console import Console
 from rich.table import Table
 
 from network_scanner.config.settings import Settings
+from network_scanner.config.logging_utils import get_app_logger
 from network_scanner.db.dao import (
     create_sqlite_engine,
     init_db,
@@ -41,6 +42,8 @@ def cli(ctx: click.Context, config_path: Optional[Path]) -> None:
     ctx.ensure_object(dict)
     settings = Settings.load(str(config_path) if config_path else None)
     ctx.obj["settings"] = settings
+    # Initialize logger and store in context
+    ctx.obj["logger"] = get_app_logger(settings)
     if ctx.invoked_subcommand is None:
         click.echo(ctx.get_help())
         ctx.exit(0)
@@ -61,6 +64,7 @@ def init_db_cmd(ctx: click.Context) -> None:  # type: ignore[override]
 @click.pass_context
 def add_tenant_cmd(ctx: click.Context, name: str, desc: Optional[str]) -> None:  # type: ignore[override]
     settings: Settings = ctx.obj["settings"]
+    logger = ctx.obj.get("logger")
     engine = create_sqlite_engine(settings.sqlite_path)
     init_db(engine)
     with get_session(engine) as s:
@@ -68,6 +72,8 @@ def add_tenant_cmd(ctx: click.Context, name: str, desc: Optional[str]) -> None: 
             console.print(f"Tenant '{name}' already exists", style="yellow")
             return
         t = add_tenant(s, name=name, description=desc)
+        if logger:
+            logger.info("Tenant created: id=%s name=%s desc=%s", t.id, t.name, t.description or "")
         console.print(f"Created tenant id={t.id} name={t.name}")
 
 
@@ -78,13 +84,24 @@ def add_tenant_cmd(ctx: click.Context, name: str, desc: Optional[str]) -> None: 
 @click.pass_context
 def edit_tenant_cmd(ctx: click.Context, name: str, new_name: Optional[str], desc: Optional[str]) -> None:  # type: ignore[override]
     settings: Settings = ctx.obj["settings"]
+    logger = ctx.obj.get("logger")
     engine = create_sqlite_engine(settings.sqlite_path)
     with get_session(engine) as s:
         t = get_tenant_by_name(s, name)
         if not t:
             console.print(f"Tenant '{name}' not found", style="red")
             sys.exit(1)
+        old_name, old_desc = t.name, t.description or ""
         update_tenant(s, t, name=new_name, description=desc)
+        if logger:
+            logger.info(
+                "Tenant edited: id=%s name:%s->%s desc:%s->%s",
+                t.id,
+                old_name,
+                t.name,
+                old_desc,
+                t.description or "",
+            )
         console.print(f"Updated tenant id={t.id} name={t.name}")
 
 
@@ -97,13 +114,17 @@ def delete_tenant_cmd(ctx: click.Context, name: str, yes: bool) -> None:  # type
         console.print("Use --yes to confirm deletion", style="yellow")
         sys.exit(1)
     settings: Settings = ctx.obj["settings"]
+    logger = ctx.obj.get("logger")
     engine = create_sqlite_engine(settings.sqlite_path)
     with get_session(engine) as s:
         t = get_tenant_by_name(s, name)
         if not t:
             console.print(f"Tenant '{name}' not found", style="red")
             sys.exit(1)
+        tid, tname = t.id, t.name
         delete_tenant(s, t)
+        if logger:
+            logger.info("Tenant deleted: id=%s name=%s", tid, tname)
         console.print(f"Deleted tenant '{name}'")
 
 
@@ -113,6 +134,7 @@ def delete_tenant_cmd(ctx: click.Context, name: str, yes: bool) -> None:  # type
 @click.pass_context
 def add_network_cmd(ctx: click.Context, tenant: str, cidr: str) -> None:  # type: ignore[override]
     settings: Settings = ctx.obj["settings"]
+    logger = ctx.obj.get("logger")
     engine = create_sqlite_engine(settings.sqlite_path)
     init_db(engine)
     with get_session(engine) as s:
@@ -121,6 +143,8 @@ def add_network_cmd(ctx: click.Context, tenant: str, cidr: str) -> None:  # type
             console.print(f"Tenant '{tenant}' not found", style="red")
             sys.exit(1)
         n = add_network(s, t, cidr)
+        if logger:
+            logger.info("Network added: tenant=%s id=%s cidr=%s", t.name, n.id, n.cidr)
         console.print(f"Added network '{n.cidr}' to tenant '{t.name}'")
 
 
@@ -130,13 +154,17 @@ def add_network_cmd(ctx: click.Context, tenant: str, cidr: str) -> None:  # type
 @click.pass_context
 def edit_network_cmd(ctx: click.Context, network_id: int, cidr: str) -> None:  # type: ignore[override]
     settings: Settings = ctx.obj["settings"]
+    logger = ctx.obj.get("logger")
     engine = create_sqlite_engine(settings.sqlite_path)
     with get_session(engine) as s:
         net = get_network_by_id(s, network_id)
         if not net:
             console.print(f"Network id={network_id} not found", style="red")
             sys.exit(1)
+        old_cidr = net.cidr
         update_network(s, net, cidr=cidr)
+        if logger:
+            logger.info("Network edited: id=%s cidr:%s->%s tenant=%s", net.id, old_cidr, net.cidr, net.tenant.name)
         console.print(f"Updated network id={net.id} cidr={net.cidr}")
 
 
@@ -149,13 +177,17 @@ def delete_network_cmd(ctx: click.Context, network_id: int, yes: bool) -> None: 
         console.print("Use --yes to confirm deletion", style="yellow")
         sys.exit(1)
     settings: Settings = ctx.obj["settings"]
+    logger = ctx.obj.get("logger")
     engine = create_sqlite_engine(settings.sqlite_path)
     with get_session(engine) as s:
         net = get_network_by_id(s, network_id)
         if not net:
             console.print(f"Network id={network_id} not found", style="red")
             sys.exit(1)
+        nid, ncidr, tname = net.id, net.cidr, net.tenant.name
         delete_network(s, net)
+        if logger:
+            logger.info("Network deleted: id=%s cidr=%s tenant=%s", nid, ncidr, tname)
         console.print(f"Deleted network id={network_id}")
 
 
@@ -202,10 +234,10 @@ def delete_scan_cmd(ctx: click.Context, scan_id: int, yes: bool) -> None:  # typ
 @cli.command()
 @click.option("--tenant", required=True, help="Tenant name")
 @click.option("--tcp", required=False, default=None, help="Comma-separated TCP ports or ranges, e.g. 22,80,443,1-1024")
-@click.option("--udp", required=False, default=None, help="Comma-separated UDP ports or ranges, e.g. 53,123,161")
 @click.pass_context
-def set_ports_cmd(ctx: click.Context, tenant: str, tcp: Optional[str], udp: Optional[str]) -> None:  # type: ignore[override]
+def set_ports_cmd(ctx: click.Context, tenant: str, tcp: Optional[str]) -> None:  # type: ignore[override]
     settings: Settings = ctx.obj["settings"]
+    logger = ctx.obj.get("logger")
     engine = create_sqlite_engine(settings.sqlite_path)
     init_db(engine)
     with get_session(engine) as s:
@@ -213,8 +245,10 @@ def set_ports_cmd(ctx: click.Context, tenant: str, tcp: Optional[str], udp: Opti
         if not t:
             console.print(f"Tenant '{tenant}' not found", style="red")
             sys.exit(1)
-        cfg = set_tenant_ports(s, t, tcp_ports=(tcp or None), udp_ports=(udp or None))
-        console.print(f"Set ports for tenant '{t.name}': tcp='{cfg.tcp_ports or ''}' udp='{cfg.udp_ports or ''}'")
+        cfg = set_tenant_ports(s, t, tcp_ports=(tcp or None), udp_ports=None)
+        if logger:
+            logger.info("Tenant ports set: tenant=%s tcp=%s", t.name, cfg.tcp_ports or "")
+        console.print(f"Set ports for tenant '{t.name}': tcp='{cfg.tcp_ports or ''}'")
 
 
 @cli.command()
@@ -233,7 +267,6 @@ def show_ports_cmd(ctx: click.Context, tenant: str) -> None:  # type: ignore[ove
         table.add_column("Protocol")
         table.add_column("Ports")
         table.add_row("TCP", cfg.tcp_ports or "(default)") if cfg else table.add_row("TCP", "(default)")
-        table.add_row("UDP", cfg.udp_ports or "(default)") if cfg else table.add_row("UDP", "(default)")
         console.print(table)
 @cli.command()
 @click.pass_context
@@ -278,6 +311,9 @@ def scan_cmd(ctx: click.Context, tenant: str, mode: str) -> None:  # type: ignor
     from network_scanner.scan.runner import run_scan_for_tenant
 
     settings: Settings = ctx.obj["settings"]
+    logger = ctx.obj.get("logger")
+    if logger:
+        logger.info("Scan requested: tenant=%s mode=%s", tenant, mode)
     run_scan_for_tenant(settings, tenant_name=tenant, mode=mode)
 
 

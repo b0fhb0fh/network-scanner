@@ -17,6 +17,16 @@ def create_sqlite_engine(db_path: Path) -> Engine:
 
 def init_db(engine: Engine) -> None:
     Base.metadata.create_all(engine)
+    # Lightweight migration: drop udp_ports column from tenant_ports if it still exists
+    try:
+        with engine.begin() as conn:
+            info = list(conn.exec_driver_sql("PRAGMA table_info('tenant_ports')").fetchall())
+            col_names = {row[1] for row in info}  # row[1] is 'name'
+            if "udp_ports" in col_names:
+                conn.exec_driver_sql("ALTER TABLE tenant_ports DROP COLUMN udp_ports")
+    except Exception:
+        # Ignore migration errors (older SQLite without DROP COLUMN or already migrated)
+        pass
 
 
 @contextmanager
@@ -115,14 +125,13 @@ def get_tenant_ports(session: Session, tenant: Tenant) -> TenantPorts | None:
     return session.scalar(select(TenantPorts).where(TenantPorts.tenant_id == tenant.id))
 
 
-def set_tenant_ports(session: Session, tenant: Tenant, *, tcp_ports: str | None, udp_ports: str | None) -> TenantPorts:
+def set_tenant_ports(session: Session, tenant: Tenant, *, tcp_ports: str | None) -> TenantPorts:
     cfg = get_tenant_ports(session, tenant)
     if cfg is None:
         cfg = TenantPorts(tenant_id=tenant.id)
         session.add(cfg)
         session.flush()
     cfg.tcp_ports = tcp_ports
-    cfg.udp_ports = udp_ports
     session.flush()
     return cfg
 

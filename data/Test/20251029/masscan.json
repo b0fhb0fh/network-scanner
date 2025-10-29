@@ -1,0 +1,112 @@
+{
+  "command_line": "masscan -oJ - 1.1.1.1/32 -p 1-65535 --rate 2048 --open-only",
+  "scan": {
+    "1.1.1.1": [
+      {
+        "port": 2096,
+        "proto": "tcp",
+        "status": "open",
+        "reason": "syn-ack",
+        "ttl": 53
+      },
+      {
+        "port": 53,
+        "proto": "tcp",
+        "status": "open",
+        "reason": "syn-ack",
+        "ttl": 53
+      },
+      {
+        "port": 2087,
+        "proto": "tcp",
+        "status": "open",
+        "reason": "syn-ack",
+        "ttl": 53
+      },
+      {
+        "port": 2053,
+        "proto": "tcp",
+        "status": "open",
+        "reason": "syn-ack",
+        "ttl": 53
+      },
+      {
+        "port": 2052,
+        "proto": "tcp",
+        "status": "open",
+        "reason": "syn-ack",
+        "ttl": 53
+      },
+      {
+        "port": 2086,
+        "proto": "tcp",
+        "status": "open",
+        "reason": "syn-ack",
+        "ttl": 53
+      },
+      {
+        "port": 8443,
+        "proto": "tcp",
+        "status": "open",
+        "reason": "syn-ack",
+        "ttl": 53
+      },
+      {
+        "port": 853,
+        "proto": "tcp",
+        "status": "open",
+        "reason": "syn-ack",
+        "ttl": 53
+      },
+      {
+        "port": 2095,
+        "proto": "tcp",
+        "status": "open",
+        "reason": "syn-ack",
+        "ttl": 53
+      },
+      {
+        "port": 80,
+        "proto": "tcp",
+        "status": "open",
+        "reason": "syn-ack",
+        "ttl": 53
+      },
+      {
+        "port": 2083,
+        "proto": "tcp",
+        "status": "open",
+        "reason": "syn-ack",
+        "ttl": 53
+      },
+      {
+        "port": 443,
+        "proto": "tcp",
+        "status": "open",
+        "reason": "syn-ack",
+        "ttl": 53
+      },
+      {
+        "port": 8080,
+        "proto": "tcp",
+        "status": "open",
+        "reason": "syn-ack",
+        "ttl": 53
+      },
+      {
+        "port": 2082,
+        "proto": "tcp",
+        "status": "open",
+        "reason": "syn-ack",
+        "ttl": 53
+      },
+      {
+        "port": 8880,
+        "proto": "tcp",
+        "status": "open",
+        "reason": "syn-ack",
+        "ttl": 53
+      }
+    ]
+  }
+}

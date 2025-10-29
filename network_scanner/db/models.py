@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from sqlalchemy import (
@@ -51,7 +51,6 @@ class TenantPorts(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     tenant_id: Mapped[int] = mapped_column(ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False, unique=True, index=True)
     tcp_ports: Mapped[Optional[str]] = mapped_column(String(4096), nullable=True)  # comma-separated
-    udp_ports: Mapped[Optional[str]] = mapped_column(String(4096), nullable=True)  # comma-separated
 
     tenant: Mapped[Tenant] = relationship("Tenant")
 
@@ -61,7 +60,7 @@ class Scan(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     tenant_id: Mapped[int] = mapped_column(ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False, index=True)
-    started_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    started_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
     finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     mode: Mapped[str] = mapped_column(String(16), nullable=False, default="tcp")  # tcp|all
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="running")  # running|done|failed
