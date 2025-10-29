@@ -1,19 +1,15 @@
 ## Network Scanner
 
-Инструмент для быстрого сканирования сетей: быстрый проход Masscan (через библиотеку python-masscan) с последующим уточнением результатов в Nmap и сохранением в SQLite.
+Инструмент для быстрого TCP‑сканирования: быстрый проход Masscan (через библиотеку python-masscan) с последующим уточнением результатов в Nmap и сохранением в SQLite.
 
 ### Возможности
-- **Быстрое обнаружение хостов и портов** с помощью Masscan (через `python-masscan`).
-- **Подтверждение и обогащение TCP-сервисов** с помощью Nmap (XML → парсинг в БД).
-- **Хранение результатов** в SQLite, удобные команды CLI для управления арендаторами и сетями.
+- **Быстрое обнаружение хостов и TCP‑портов** с помощью Masscan (через `python-masscan`).
+- **Подтверждение и обогащение TCP‑сервисов** с помощью Nmap (XML → парсинг в БД; опционально `-sV`).
+- **Хранение результатов** в SQLite, удобные команды CLI для управления арендаторами, сетями и результатами.
 
 ### Требования
 - Python 3.10+
-- Системные бинарники:
-  - `masscan` (должен быть установлен и доступен в PATH)
-  - `nmap` (должен быть установлен и доступен в PATH)
-
-Установка `masscan`/`nmap` зависит от вашей ОС (например, на macOS через Homebrew: `brew install masscan nmap`).
+- Установленный бинарник `nmap` в PATH (например, на macOS: `brew install nmap`).
 
 ### Установка
 ```bash
@@ -23,25 +19,26 @@ pip install -r requirements.txt
 ```
 
 ### Конфигурация
-Параметры читаются из переменных окружения или YAML-файла.
+Параметры читаются из (в порядке приоритета):
+1) Файл, указанный `--config` (формат key=value, одна пара на строку)
+2) Файл `.env` в корне проекта (если `--config` не указан)
+3) Переменные окружения
 
-- Переменные окружения:
-  - `NETWORK_SCANNER_DB` — путь к SQLite (по умолчанию `./scanner.sqlite`)
-  - `NETWORK_SCANNER_DATA` — директория данных/артефактов (по умолчанию `./data`)
-  - `NETWORK_SCANNER_RATE` — скорость сканирования masscan (по умолчанию `2048`)
-  - `NETWORK_SCANNER_MASSCAN` — путь к бинарнику masscan (по умолчанию `masscan`)
-  - `NETWORK_SCANNER_NMAP` — путь к бинарнику nmap (по умолчанию `nmap`)
+Поддерживаемые ключи/переменные:
+- Путь к SQLite: `sqlite_path` | `NETWORK_SCANNER_DB` | `SQLITE_PATH` (по умолчанию `./scanner.sqlite`)
+- Директория данных: `data_dir` | `NETWORK_SCANNER_DATA` | `DATA_DIR` (по умолчанию `./data`)
+- Скорость masscan: `rate` | `NETWORK_SCANNER_RATE` | `RATE` (по умолчанию `2048`)
+- Путь к `nmap`: `nmap_path` | `NETWORK_SCANNER_NMAP` | `NMAP_PATH` (по умолчанию `nmap`)
+- TCP‑порты по умолчанию: `tcp_ports_default` | `NETWORK_SCANNER_TCP_PORTS_DEFAULT` | `TCP_PORTS_DEFAULT`
 
-- YAML-файл (ключи опциональны):
-```yaml
-sqlite_path: ./scanner.sqlite
-data_dir: ./data
-rate: 4096
-nmap_path: nmap
-tcp_ports_default: "22,80,443"
+Пример `.env`:
+```ini
+sqlite_path=./scanner.sqlite
+data_dir=./data
+rate=4096
+nmap_path=nmap
+tcp_ports_default=22,80,443
 ```
-
-Передать путь к YAML можно опцией `--config` (см. ниже).
 
 ### CLI
 Запуск CLI:
@@ -53,51 +50,57 @@ python cli.py -h
 Основные команды:
 - Инициализация БД:
 ```bash
-python cli.py init-db-cmd
+python cli.py init-db
 ```
 
 - Добавить арендатора:
 ```bash
-python cli.py add-tenant-cmd --name ACME --desc "Internal networks"
+python cli.py add-tenant --name ACME --desc "Internal networks"
 ```
 
 - Добавить сеть для арендатора:
 ```bash
-python cli.py add-network-cmd --tenant ACME --cidr 10.0.0.0/24
+python cli.py add-network --tenant ACME --cidr 10.0.0.0/24
 ```
 
 - Список арендаторов:
 ```bash
-python cli.py list-tenants-cmd
+python cli.py list-tenants
 ```
 
 - Список сетей (опционально фильтр по арендатору):
 ```bash
-python cli.py list-networks-cmd --tenant ACME
+python cli.py list-networks --tenant ACME
 ```
 
 - Сканирование:
 ```bash
-python cli.py scan-cmd --tenant ACME --mode tcp
-# или
-python cli.py scan-cmd --tenant ACME --mode all
+python cli.py scan --tenant ACME --mode tcp
+# или полный диапазон TCP
+python cli.py scan --tenant ACME --mode all
+
+# Определение названий и версий сервисов (-sV)
+python cli.py scan --tenant ACME --mode tcp --service-info
 ```
 
 Пример с конфигом:
 ```bash
-python cli.py --config ./settings.yaml scan-cmd --tenant ACME
+python cli.py --config ./settings.yaml scan --tenant ACME
 ```
 
 Примечания по опциям:
-- `--mode tcp` — сканирует TCP-порты (по умолчанию). Список берётся из настроек арендатора или `tcp_ports_default` из конфигурации.
-- `--mode all` — сканирует полный TCP-диапазон `1-65535`.
+- `--mode tcp` — сканирует TCP‑порты (по умолчанию). Список берётся из настроек арендатора или `tcp_ports_default`.
+- `--mode all` — сканирует полный TCP‑диапазон `1-65535`.
+- `--service-info` — добавляет `-sV` к `nmap` для определения названий и версий сервисов.
 
 ### Как это работает
 1. Быстрый проход выполняется через `python-masscan` (TCP), где задаются цели (CIDR/адреса), порты и ограничение скорости (`--rate`).
-2. Результаты `masscan` (хосты и открытые TCP-порты) передаются в `nmap` для подтверждения и обогащения.
+2. Результаты `masscan` (хосты и открытые TCP‑порты) передаются в `nmap` для подтверждения и обогащения (опционально `-sV`).
 3. Nmap сохраняет XML в директорию данных, XML парсится и записывается в SQLite.
 
-Артефакты и отчеты складываются в `NETWORK_SCANNER_DATA/<tenant>/<YYYYMMDD>/`.
+Артефакты и отчеты складываются в `data/<tenant>/<YYYYMMDD>/`:
+- `masscan.json` — полный JSON‑ответ Masscan
+- `nmap.xml` — результат Nmap (для парсинга в БД)
 
 ### Тонкости и ограничения
 - `python-masscan` требует установленный системный бинарник `masscan`.
