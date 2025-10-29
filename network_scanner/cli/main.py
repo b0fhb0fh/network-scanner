@@ -30,13 +30,31 @@ from network_scanner.db.dao import (
     get_tenant_ports,
     set_tenant_ports,
 )
+from network_scanner.db.models import Scan, Host, Service
+from sqlalchemy import select, desc
 
 
 console = Console()
 
 
+def _fmt_dt(dt: object) -> str:
+    try:
+        if isinstance(dt, str):
+            # Trim fractional seconds if present
+            return dt.split(".")[0]
+        # type: ignore[attr-defined]
+        return dt.replace(microsecond=0).isoformat(sep=" ")  # type: ignore[union-attr]
+    except Exception:
+        return str(dt) if dt is not None else ""
+
 @click.group(invoke_without_command=True, context_settings={"help_option_names": ["-h", "--help"]})
-@click.option("--config", "config_path", type=click.Path(path_type=Path), default=None)
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Path to config file (.env or key=value lines). If omitted, .env is used when present",
+)
 @click.pass_context
 def cli(ctx: click.Context, config_path: Optional[Path]) -> None:
     ctx.ensure_object(dict)
@@ -52,6 +70,7 @@ def cli(ctx: click.Context, config_path: Optional[Path]) -> None:
 @cli.command()
 @click.pass_context
 def init_db_cmd(ctx: click.Context) -> None:  # type: ignore[override]
+    """Initialize the SQLite database schema."""
     settings: Settings = ctx.obj["settings"]
     engine = create_sqlite_engine(settings.sqlite_path)
     init_db(engine)
@@ -63,6 +82,7 @@ def init_db_cmd(ctx: click.Context) -> None:  # type: ignore[override]
 @click.option("--desc", required=False, default=None, help="Tenant description")
 @click.pass_context
 def add_tenant_cmd(ctx: click.Context, name: str, desc: Optional[str]) -> None:  # type: ignore[override]
+    """Create a new tenant with optional description."""
     settings: Settings = ctx.obj["settings"]
     logger = ctx.obj.get("logger")
     engine = create_sqlite_engine(settings.sqlite_path)
@@ -83,6 +103,7 @@ def add_tenant_cmd(ctx: click.Context, name: str, desc: Optional[str]) -> None: 
 @click.option("--desc", required=False, default=None, help="New tenant description")
 @click.pass_context
 def edit_tenant_cmd(ctx: click.Context, name: str, new_name: Optional[str], desc: Optional[str]) -> None:  # type: ignore[override]
+    """Edit tenant's name and/or description by current name."""
     settings: Settings = ctx.obj["settings"]
     logger = ctx.obj.get("logger")
     engine = create_sqlite_engine(settings.sqlite_path)
@@ -110,6 +131,7 @@ def edit_tenant_cmd(ctx: click.Context, name: str, new_name: Optional[str], desc
 @click.option("--yes", is_flag=True, help="Confirm deletion")
 @click.pass_context
 def delete_tenant_cmd(ctx: click.Context, name: str, yes: bool) -> None:  # type: ignore[override]
+    """Delete tenant and all associated data (requires --yes)."""
     if not yes:
         console.print("Use --yes to confirm deletion", style="yellow")
         sys.exit(1)
@@ -133,6 +155,7 @@ def delete_tenant_cmd(ctx: click.Context, name: str, yes: bool) -> None:  # type
 @click.option("--cidr", required=True, help="Network CIDR or IP/range")
 @click.pass_context
 def add_network_cmd(ctx: click.Context, tenant: str, cidr: str) -> None:  # type: ignore[override]
+    """Add a network CIDR or IP/range to a tenant."""
     settings: Settings = ctx.obj["settings"]
     logger = ctx.obj.get("logger")
     engine = create_sqlite_engine(settings.sqlite_path)
@@ -153,6 +176,7 @@ def add_network_cmd(ctx: click.Context, tenant: str, cidr: str) -> None:  # type
 @click.option("--cidr", required=True, help="New CIDR or IP/range")
 @click.pass_context
 def edit_network_cmd(ctx: click.Context, network_id: int, cidr: str) -> None:  # type: ignore[override]
+    """Update CIDR for an existing network by id."""
     settings: Settings = ctx.obj["settings"]
     logger = ctx.obj.get("logger")
     engine = create_sqlite_engine(settings.sqlite_path)
@@ -173,6 +197,7 @@ def edit_network_cmd(ctx: click.Context, network_id: int, cidr: str) -> None:  #
 @click.option("--yes", is_flag=True, help="Confirm deletion")
 @click.pass_context
 def delete_network_cmd(ctx: click.Context, network_id: int, yes: bool) -> None:  # type: ignore[override]
+    """Delete a network by id (requires --yes)."""
     if not yes:
         console.print("Use --yes to confirm deletion", style="yellow")
         sys.exit(1)
@@ -195,6 +220,7 @@ def delete_network_cmd(ctx: click.Context, network_id: int, yes: bool) -> None: 
 @click.option("--tenant", required=False, default=None, help="Tenant name filter")
 @click.pass_context
 def list_scans_cmd(ctx: click.Context, tenant: Optional[str]) -> None:  # type: ignore[override]
+    """List scans, optionally filtered by tenant name."""
     settings: Settings = ctx.obj["settings"]
     engine = create_sqlite_engine(settings.sqlite_path)
     with get_session(engine) as s:
@@ -208,7 +234,14 @@ def list_scans_cmd(ctx: click.Context, tenant: Optional[str]) -> None:  # type: 
         table.add_column("Started")
         table.add_column("Finished")
         for sc in scans:
-            table.add_row(str(sc.id), (t.name if t else sc.tenant.name), sc.mode, sc.status, str(sc.started_at), str(sc.finished_at or ""))
+            table.add_row(
+                str(sc.id),
+                (t.name if t else sc.tenant.name),
+                sc.mode,
+                sc.status,
+                _fmt_dt(sc.started_at),
+                _fmt_dt(sc.finished_at) if sc.finished_at else "",
+            )
         console.print(table)
 
 
@@ -217,6 +250,7 @@ def list_scans_cmd(ctx: click.Context, tenant: Optional[str]) -> None:  # type: 
 @click.option("--yes", is_flag=True, help="Confirm deletion")
 @click.pass_context
 def delete_scan_cmd(ctx: click.Context, scan_id: int, yes: bool) -> None:  # type: ignore[override]
+    """Delete a scan (and its hosts/services) by id (requires --yes)."""
     if not yes:
         console.print("Use --yes to confirm deletion", style="yellow")
         sys.exit(1)
@@ -236,6 +270,7 @@ def delete_scan_cmd(ctx: click.Context, scan_id: int, yes: bool) -> None:  # typ
 @click.option("--tcp", required=False, default=None, help="Comma-separated TCP ports or ranges, e.g. 22,80,443,1-1024")
 @click.pass_context
 def set_ports_cmd(ctx: click.Context, tenant: str, tcp: Optional[str]) -> None:  # type: ignore[override]
+    """Set tenant TCP ports as a comma-separated list or ranges (e.g. 22,80,443,1-1024)."""
     settings: Settings = ctx.obj["settings"]
     logger = ctx.obj.get("logger")
     engine = create_sqlite_engine(settings.sqlite_path)
@@ -255,6 +290,7 @@ def set_ports_cmd(ctx: click.Context, tenant: str, tcp: Optional[str]) -> None: 
 @click.option("--tenant", required=True, help="Tenant name")
 @click.pass_context
 def show_ports_cmd(ctx: click.Context, tenant: str) -> None:  # type: ignore[override]
+    """Show tenant TCP ports or indicate that defaults are used."""
     settings: Settings = ctx.obj["settings"]
     engine = create_sqlite_engine(settings.sqlite_path)
     with get_session(engine) as s:
@@ -268,9 +304,213 @@ def show_ports_cmd(ctx: click.Context, tenant: str) -> None:  # type: ignore[ove
         table.add_column("Ports")
         table.add_row("TCP", cfg.tcp_ports or "(default)") if cfg else table.add_row("TCP", "(default)")
         console.print(table)
+
+
+@cli.command()
+@click.option("--tenant", required=True, help="Tenant name")
+@click.pass_context
+def show_last_scan_cmd(ctx: click.Context, tenant: str) -> None:  # type: ignore[override]
+    """Display results of the most recent scan for a tenant."""
+    settings: Settings = ctx.obj["settings"]
+    logger = ctx.obj.get("logger")
+    engine = create_sqlite_engine(settings.sqlite_path)
+    with get_session(engine) as s:
+        t = get_tenant_by_name(s, tenant)
+        if not t:
+            console.print(f"Tenant '{tenant}' not found", style="red")
+            sys.exit(1)
+
+        # Get the most recent scan for this tenant
+        last_scan = s.scalar(
+            select(Scan)
+            .where(Scan.tenant_id == t.id)
+            .order_by(desc(Scan.started_at))
+            .limit(1)
+        )
+
+        if not last_scan:
+            console.print(f"No scans found for tenant '{tenant}'", style="yellow")
+            return
+
+        if logger:
+            logger.info("Showing last scan results: tenant=%s scan_id=%s", tenant, last_scan.id)
+
+        # Get hosts for this scan
+        hosts = s.scalars(select(Host).where(Host.scan_id == last_scan.id).order_by(Host.ip)).all()
+
+        if not hosts:
+            console.print(f"No hosts found in last scan for tenant '{tenant}'", style="yellow")
+            return
+
+        # Display scan info
+        scan_table = Table(title=f"Last Scan for {t.name}")
+        scan_table.add_column("Property")
+        scan_table.add_column("Value")
+        scan_table.add_row("Scan ID", str(last_scan.id))
+        scan_table.add_row("Mode", last_scan.mode)
+        scan_table.add_row("Status", last_scan.status)
+        scan_table.add_row("Started", _fmt_dt(last_scan.started_at))
+        scan_table.add_row("Finished", _fmt_dt(last_scan.finished_at) if last_scan.finished_at else "N/A")
+        console.print(scan_table)
+        console.print()
+
+        # Display hosts and services
+        for host in hosts:
+            host_table = Table(title=f"Host: {host.ip} ({host.hostname or 'No hostname'})")
+            host_table.add_column("Port")
+            host_table.add_column("Protocol")
+            host_table.add_column("Service")
+            host_table.add_column("Product")
+            host_table.add_column("Version")
+            host_table.add_column("Discovered")
+
+            services = s.scalars(
+                select(Service)
+                .where(Service.host_id == host.id)
+                .order_by(Service.port, Service.protocol)
+            ).all()
+
+            if services:
+                for svc in services:
+                    host_table.add_row(
+                        str(svc.port),
+                        svc.protocol,
+                        svc.name or "",
+                        svc.product or "",
+                        svc.version or "",
+                        (_fmt_dt(svc.time_discovery) if svc.time_discovery else "N/A")
+                    )
+            else:
+                host_table.add_row("No services", "", "", "", "", "")
+
+            console.print(host_table)
+            console.print()
+
+
+@cli.command()
+@click.option("--tenant", required=True, help="Tenant name")
+@click.pass_context
+def diff_scans_cmd(ctx: click.Context, tenant: str) -> None:  # type: ignore[override]
+    """Show differences between the last two scans for a tenant (hosts and ports)."""
+    settings: Settings = ctx.obj["settings"]
+    logger = ctx.obj.get("logger")
+    engine = create_sqlite_engine(settings.sqlite_path)
+    with get_session(engine) as s:
+        t = get_tenant_by_name(s, tenant)
+        if not t:
+            console.print(f"Tenant '{tenant}' not found", style="red")
+            sys.exit(1)
+
+        scans = s.scalars(
+            select(Scan)
+            .where(Scan.tenant_id == t.id)
+            .order_by(desc(Scan.started_at))
+            .limit(2)
+        ).all()
+        if len(scans) < 2:
+            console.print(f"Need at least two scans for tenant '{tenant}' to show diff", style="yellow")
+            return
+
+        newer, older = scans[0], scans[1]
+        if logger:
+            logger.info(
+                "Diff scans requested: tenant=%s newer_id=%s older_id=%s",
+                tenant,
+                newer.id,
+                older.id,
+            )
+
+        # Load hosts for both scans
+        newer_hosts = s.scalars(select(Host).where(Host.scan_id == newer.id)).all()
+        older_hosts = s.scalars(select(Host).where(Host.scan_id == older.id)).all()
+
+        newer_host_ips = {h.ip for h in newer_hosts}
+        older_host_ips = {h.ip for h in older_hosts}
+
+        hosts_added = sorted(newer_host_ips - older_host_ips)
+        hosts_removed = sorted(older_host_ips - newer_host_ips)
+        common_hosts = sorted(newer_host_ips & older_host_ips)
+
+        # Map host ip -> set of (protocol, port)
+        def services_by_host(hosts: list[Host]) -> dict[str, set[tuple[str, int]]]:
+            if not hosts:
+                return {}
+            host_id_to_ip = {h.id: h.ip for h in hosts}
+            svc_rows = s.scalars(
+                select(Service).where(Service.host_id.in_(list(host_id_to_ip.keys())))
+            ).all()
+            result: dict[str, set[tuple[str, int]]] = {}
+            for sv in svc_rows:
+                ip = host_id_to_ip.get(sv.host_id)
+                if not ip:
+                    continue
+                result.setdefault(ip, set()).add((sv.protocol, int(sv.port)))
+            return result
+
+        newer_services = services_by_host(newer_hosts)
+        older_services = services_by_host(older_hosts)
+
+        # Header table
+        info_table = Table(title=f"Diff of last two scans for {t.name}")
+        info_table.add_column("Property")
+        info_table.add_column("Value")
+        info_table.add_row("Newer Scan ID", str(newer.id))
+        info_table.add_row("Newer Started", _fmt_dt(newer.started_at))
+        info_table.add_row("Older Scan ID", str(older.id))
+        info_table.add_row("Older Started", _fmt_dt(older.started_at))
+        console.print(info_table)
+        console.print()
+
+        # Hosts added/removed
+        if hosts_added or hosts_removed:
+            hr_table = Table(title="Hosts changes")
+            hr_table.add_column("Type")
+            hr_table.add_column("Hosts")
+            if hosts_added:
+                hr_table.add_row("Added", ", ".join(hosts_added))
+            if hosts_removed:
+                hr_table.add_row("Removed", ", ".join(hosts_removed))
+            console.print(hr_table)
+            console.print()
+        else:
+            console.print("No host changes", style="green")
+            console.print()
+
+        # Port diffs for common hosts
+        any_port_changes = False
+        for ip in common_hosts:
+            new_set = newer_services.get(ip, set())
+            old_set = older_services.get(ip, set())
+            added_ports = sorted(list(new_set - old_set), key=lambda x: (x[0], x[1]))
+            removed_ports = sorted(list(old_set - new_set), key=lambda x: (x[0], x[1]))
+            if not added_ports and not removed_ports:
+                continue
+            any_port_changes = True
+            ht = Table(title=f"Ports change for {ip}")
+            ht.add_column("Type")
+            ht.add_column("Ports")
+            if added_ports:
+                ht.add_row(
+                    "Opened",
+                    ", ".join(f"{proto}:{port}" for proto, port in added_ports),
+                )
+            if removed_ports:
+                ht.add_row(
+                    "Closed",
+                    ", ".join(f"{proto}:{port}" for proto, port in removed_ports),
+                )
+            console.print(ht)
+            console.print()
+
+        if not any_port_changes:
+            console.print("No port changes on common hosts", style="green")
+            console.print()
+
+
 @cli.command()
 @click.pass_context
 def list_tenants_cmd(ctx: click.Context) -> None:  # type: ignore[override]
+    """List all tenants."""
     settings: Settings = ctx.obj["settings"]
     engine = create_sqlite_engine(settings.sqlite_path)
     with get_session(engine) as s:
@@ -288,6 +528,7 @@ def list_tenants_cmd(ctx: click.Context) -> None:  # type: ignore[override]
 @click.option("--tenant", required=False, default=None, help="Tenant name filter")
 @click.pass_context
 def list_networks_cmd(ctx: click.Context, tenant: Optional[str]) -> None:  # type: ignore[override]
+    """List networks, optionally filtered by tenant name."""
     settings: Settings = ctx.obj["settings"]
     engine = create_sqlite_engine(settings.sqlite_path)
     with get_session(engine) as s:
@@ -306,14 +547,16 @@ def list_networks_cmd(ctx: click.Context, tenant: Optional[str]) -> None:  # typ
 @cli.command()
 @click.option("--tenant", required=True, help="Tenant name to scan")
 @click.option("--mode", type=click.Choice(["tcp", "all"]), default="tcp")
+@click.option("--service-info", is_flag=True, help="Enable nmap service/version detection (-sV)")
 @click.pass_context
-def scan_cmd(ctx: click.Context, tenant: str, mode: str) -> None:  # type: ignore[override]
+def scan_cmd(ctx: click.Context, tenant: str, mode: str, service_info: bool) -> None:  # type: ignore[override]
+    """Run a scan for a tenant (TCP only). Use --mode all for 1-65535; add --service-info to enable nmap -sV."""
     from network_scanner.scan.runner import run_scan_for_tenant
 
     settings: Settings = ctx.obj["settings"]
     logger = ctx.obj.get("logger")
     if logger:
-        logger.info("Scan requested: tenant=%s mode=%s", tenant, mode)
-    run_scan_for_tenant(settings, tenant_name=tenant, mode=mode)
+        logger.info("Scan requested: tenant=%s mode=%s service_info=%s", tenant, mode, service_info)
+    run_scan_for_tenant(settings, tenant_name=tenant, mode=mode, service_info=service_info)
 
 

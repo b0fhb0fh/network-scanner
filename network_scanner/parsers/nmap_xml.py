@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+from datetime import datetime, timezone
 from typing import Optional
 
 from lxml import etree
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
-from network_scanner.db.models import Host, Service
+from network_scanner.db.models import Host, Service, Scan
 from network_scanner.db.dao import get_session
 
 
@@ -28,6 +29,8 @@ def parse_nmap_xml_into_db(engine: Engine, xml_path: Path, scan_id: int) -> None
     root = etree.parse(str(xml_path), parser=parser).getroot()
 
     with get_session(engine) as s:
+        scan = s.get(Scan, scan_id)
+        time_discovery = scan.started_at if scan and isinstance(scan.started_at, datetime) else datetime.now(timezone.utc)
         for host in root.findall("host"):
             status = host.find("status")
             if status is not None and status.get("state") != "up":
@@ -69,7 +72,7 @@ def parse_nmap_xml_into_db(engine: Engine, xml_path: Path, scan_id: int) -> None
                     version=version or None,
                     extrainfo=extrainfo or None,
                     good=1 if _is_good(ip, proto, port_num, s) else 0,
-                    danger=0,
+                    time_discovery=time_discovery,
                 )
                 s.add(sv)
 

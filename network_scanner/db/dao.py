@@ -28,6 +28,32 @@ def init_db(engine: Engine) -> None:
         # Ignore migration errors (older SQLite without DROP COLUMN or already migrated)
         pass
 
+    # Migration: add time_discovery to service and drop danger if present
+    try:
+        with engine.begin() as conn:
+            info = list(conn.exec_driver_sql("PRAGMA table_info('service')").fetchall())
+            col_names = {row[1] for row in info}
+            if "time_discovery" not in col_names:
+                conn.exec_driver_sql("ALTER TABLE service ADD COLUMN time_discovery TEXT")
+                # Backfill from related scan.started_at
+                conn.exec_driver_sql(
+                    """
+                    UPDATE service
+                    SET time_discovery = (
+                        SELECT started_at FROM scan
+                        WHERE scan.id = (SELECT h.scan_id FROM host h WHERE h.id = service.host_id)
+                    )
+                    WHERE time_discovery IS NULL
+                    """
+                )
+            if "danger" in col_names:
+                try:
+                    conn.exec_driver_sql("ALTER TABLE service DROP COLUMN danger")
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
 
 @contextmanager
 def get_session(engine: Engine) -> Iterator[Session]:

@@ -93,7 +93,7 @@ class Service(Base):
     version: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     extrainfo: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     good: Mapped[bool] = mapped_column(Integer, nullable=False, default=0)  # 0/1
-    danger: Mapped[bool] = mapped_column(Integer, nullable=False, default=0)  # 0/1
+    time_discovery: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
     __table_args__ = (
         UniqueConstraint("host_id", "port", "protocol", name="uq_service_host_port_proto"),

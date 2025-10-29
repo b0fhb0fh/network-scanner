@@ -19,7 +19,7 @@ def _run(cmd: list[str], cwd: Path | None = None) -> None:
     if proc.returncode != 0:
         raise RuntimeError(f"Command failed: {' '.join(cmd)}\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}")
 
-def run_scan_for_tenant(settings: Settings, tenant_name: str, mode: str = "tcp") -> None:
+def run_scan_for_tenant(settings: Settings, tenant_name: str, mode: str = "tcp", service_info: bool = False) -> None:
     import masscan  # python-masscan
 
     engine = create_sqlite_engine(settings.sqlite_path)
@@ -45,16 +45,17 @@ def run_scan_for_tenant(settings: Settings, tenant_name: str, mode: str = "tcp")
         logger.info("Scan started: tenant=%s mode=%s targets=%s", tenant.name, mode, ",".join(targets))
         # Per-tenant port configuration (overrides defaults if present)
         cfg = get_tenant_ports(s, tenant)
-        if cfg and cfg.tcp_ports:
-            ports_arg = cfg.tcp_ports.strip()
+        if mode == "all":
+            ports_arg = "1-65535"
+            logger.info("Mode 'all' selected: using full TCP range 1-65535")
         else:
-            # Use defaults from settings if provided
-            if settings.tcp_ports_default:
+            if cfg and cfg.tcp_ports:
+                ports_arg = cfg.tcp_ports.strip()
+            elif settings.tcp_ports_default:
                 ports_arg = settings.tcp_ports_default
-            elif mode == "all":
-                ports_arg = "1-65535"
             else:
-                raise ValueError("No TCP ports configured for tenant and no default set; set tenant TCP ports or tcp_ports_default in config")
+                ports_arg = "1-65535"
+                logger.info("No tenant TCP ports or default configured; falling back to 1-65535")
 
         # Use python-masscan to perform the fast scan
         mas = masscan.PortScanner()
@@ -166,6 +167,15 @@ def run_scan_for_tenant(settings: Settings, tenant_name: str, mode: str = "tcp")
                 scan.status = "done"
                 logger.info("Scan finished: tenant=%s no ports to probe with nmap", tenant.name)
                 return
+
+            # Optionally enable service/version detection
+            if service_info and "-sV" not in nmap_args:
+                # Put -sV right after -sS if present, else near the start
+                try:
+                    sS_index = nmap_args.index("-sS")
+                    nmap_args.insert(sS_index + 1, "-sV")
+                except ValueError:
+                    nmap_args.insert(1, "-sV")
 
             nmap_args += ["-iL", str(hosts_file)]
             logger.info("Nmap params: %s", " ".join(nmap_args))
