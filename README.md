@@ -6,6 +6,7 @@
 - **Быстрое обнаружение хостов и TCP‑портов** с помощью Masscan (через `python-masscan`).
 - **Подтверждение и обогащение TCP‑сервисов** с помощью Nmap (XML → парсинг в БД; опционально `-sV`).
 - **Хранение результатов** в SQLite, удобные команды CLI для управления арендаторами, сетями и результатами.
+- **Исключения хостов/подсетей на тенанта** — исключаются из сканирования Masscan и Nmap (`--exclude`).
 
 ### Требования
 - Python 3.10+
@@ -31,6 +32,8 @@ pip install -r requirements.txt
 - Путь к `nmap`: `nmap_path` | `NETWORK_SCANNER_NMAP` | `NMAP_PATH` (по умолчанию `nmap`)
 - TCP‑порты по умолчанию: `tcp_ports_default` | `NETWORK_SCANNER_TCP_PORTS_DEFAULT` | `TCP_PORTS_DEFAULT`
 - Исключаемые TCP‑порты из nmap: `exclude_ports` | `NETWORK_SCANNER_EXCLUDE_PORTS` | `EXCLUDE_PORTS`
+
+Исключения адресов/подсетей на уровне арендатора настраиваются через CLI (см. ниже). Они применяются к обоим сканерам: Masscan (`--exclude`) и Nmap (`--exclude`).
 
 Пример `.env`:
 ```ini
@@ -85,6 +88,23 @@ python cli.py scan --tenant ACME --mode all
 python cli.py scan --tenant ACME --mode tcp --service-info
 ```
 
+- Управление исключениями (адреса/подсети/хостнеймы), применяются к Masscan и Nmap через `--exclude`:
+```bash
+# Показать исключения для арендатора
+python cli.py list-excludes --tenant ACME
+
+# Добавить исключение (IP/CIDR/hostname/range)
+python cli.py add-exclude --tenant ACME --target 10.0.0.5
+python cli.py add-exclude --tenant ACME --target 10.0.1.0/24
+python cli.py add-exclude --tenant ACME --target example.org
+
+# Изменить исключение по ID
+python cli.py edit-exclude --id 3 --target 10.0.2.0/24
+
+# Удалить исключение по ID
+python cli.py delete-exclude --id 3 --yes
+```
+
 Пример с конфигом:
 ```bash
 python cli.py --config ./settings.yaml scan --tenant ACME
@@ -94,10 +114,12 @@ python cli.py --config ./settings.yaml scan --tenant ACME
 - `--mode tcp` — сканирует TCP‑порты (по умолчанию). Список берётся из настроек арендатора или `tcp_ports_default`.
 - `--mode all` — сканирует полный TCP‑диапазон `1-65535`.
 - `--service-info` — добавляет `-sV` к `nmap` для определения названий и версий сервисов.
+- Исключения на уровне арендатора применяются автоматически: к Masscan (`--exclude`) и к Nmap (`--exclude`).
+- `exclude_ports` — глобальный параметр (конфиг/ENV) для Nmap `--exclude-ports` (исключение TCP‑портов).
 
 ### Как это работает
-1. Быстрый проход выполняется через `python-masscan` (TCP), где задаются цели (CIDR/адреса), порты и ограничение скорости (`--rate`).
-2. Результаты `masscan` (хосты и открытые TCP‑порты) передаются в `nmap` для подтверждения и обогащения (опционально `-sV`).
+1. Быстрый проход выполняется через `python-masscan` (TCP), где задаются цели (CIDR/адреса), порты и ограничение скорости (`--rate`). При наличии исключений арендатора — используются `--exclude`.
+2. Результаты `masscan` (хосты и открытые TCP‑порты) передаются в `nmap` для подтверждения и обогащения (опционально `-sV`). При наличии исключений арендатора — используются `--exclude`. Если задан `exclude_ports` — добавляется `--exclude-ports`.
 3. Nmap сохраняет XML в директорию данных, XML парсится и записывается в SQLite.
 
 Артефакты и отчеты складываются в `data/<tenant>/<YYYYMMDD>/`:

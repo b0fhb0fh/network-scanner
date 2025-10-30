@@ -29,6 +29,7 @@ class Tenant(Base):
     networks: Mapped[list[Network]] = relationship("Network", back_populates="tenant", cascade="all, delete-orphan")
     # optional one-to-one with ports config
     
+    
 
 
 class Network(Base):
@@ -53,6 +54,20 @@ class TenantPorts(Base):
     tcp_ports: Mapped[Optional[str]] = mapped_column(String(4096), nullable=True)  # comma-separated
 
     tenant: Mapped[Tenant] = relationship("Tenant")
+
+
+class TenantExclude(Base):
+    __tablename__ = "tenant_exclude"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False, index=True)
+    target: Mapped[str] = mapped_column(String(255), nullable=False)  # IP/CIDR/hostname or range
+
+    tenant: Mapped[Tenant] = relationship("Tenant")
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "target", name="uq_exclude_tenant_target"),
+    )
 
 
 class Scan(Base):

@@ -8,7 +8,7 @@ from sqlalchemy import create_engine, select, event
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
-from .models import Base, Tenant, Network, Scan, Host, Service, TenantPorts
+from .models import Base, Tenant, Network, Scan, Host, Service, TenantPorts, TenantExclude
 
 
 def create_sqlite_engine(db_path: Path) -> Engine:
@@ -65,6 +65,9 @@ def init_db(engine: Engine) -> None:
                     pass
     except Exception:
         pass
+
+    # Ensure tenant_exclude table exists (create_all above should create it for new DBs)
+    # No destructive migrations here to keep it simple
 
 
 @contextmanager
@@ -172,4 +175,32 @@ def set_tenant_ports(session: Session, tenant: Tenant, *, tcp_ports: str | None)
     cfg.tcp_ports = tcp_ports
     session.flush()
     return cfg
+
+
+# --- Per-tenant exclude targets (hosts/ranges) ---
+
+def list_tenant_excludes(session: Session, tenant: Tenant) -> list[TenantExclude]:
+    return list(session.scalars(select(TenantExclude).where(TenantExclude.tenant_id == tenant.id)))
+
+
+def add_tenant_exclude(session: Session, tenant: Tenant, target: str) -> TenantExclude:
+    item = TenantExclude(tenant_id=tenant.id, target=target)
+    session.add(item)
+    session.flush()
+    return item
+
+
+def get_tenant_exclude_by_id(session: Session, exclude_id: int) -> TenantExclude | None:
+    return session.get(TenantExclude, exclude_id)
+
+
+def update_tenant_exclude(session: Session, item: TenantExclude, *, target: str) -> TenantExclude:
+    item.target = target
+    session.flush()
+    return item
+
+
+def delete_tenant_exclude(session: Session, item: TenantExclude) -> None:
+    session.delete(item)
+    session.flush()
 

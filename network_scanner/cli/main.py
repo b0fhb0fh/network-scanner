@@ -29,6 +29,11 @@ from network_scanner.db.dao import (
     delete_scan,
     get_tenant_ports,
     set_tenant_ports,
+    list_tenant_excludes,
+    add_tenant_exclude,
+    get_tenant_exclude_by_id,
+    update_tenant_exclude,
+    delete_tenant_exclude,
 )
 from network_scanner.db.models import Scan, Host, Service
 from sqlalchemy import select, desc
@@ -281,10 +286,100 @@ def set_ports_cmd(ctx: click.Context, tenant: str, tcp: Optional[str]) -> None: 
         if not t:
             console.print(f"Tenant '{tenant}' not found", style="red")
             sys.exit(1)
-        cfg = set_tenant_ports(s, t, tcp_ports=(tcp or None), udp_ports=None)
+        cfg = set_tenant_ports(s, t, tcp_ports=(tcp or None))
         if logger:
             logger.info("Tenant ports set: tenant=%s tcp=%s", t.name, cfg.tcp_ports or "")
         console.print(f"Set ports for tenant '{t.name}': tcp='{cfg.tcp_ports or ''}'")
+
+
+@cli.command()
+@click.option("--tenant", required=True, help="Tenant name")
+@click.option("--target", required=True, help="Exclude target (IP, CIDR, hostname or range)")
+@click.pass_context
+def add_exclude_cmd(ctx: click.Context, tenant: str, target: str) -> None:  # type: ignore[override]
+    """Add an exclude target for a tenant (used with masscan/nmap --exclude)."""
+    settings: Settings = ctx.obj["settings"]
+    logger = ctx.obj.get("logger")
+    engine = create_sqlite_engine(settings.sqlite_path)
+    init_db(engine)
+    with get_session(engine) as s:
+        t = get_tenant_by_name(s, tenant)
+        if not t:
+            console.print(f"Tenant '{tenant}' not found", style="red")
+            sys.exit(1)
+        item = add_tenant_exclude(s, t, target)
+        if logger:
+            logger.info("Tenant exclude added: tenant=%s id=%s target=%s", t.name, item.id, item.target)
+        console.print(f"Added exclude id={item.id} target='{item.target}' for tenant '{t.name}'")
+
+
+@cli.command()
+@click.option("--tenant", required=True, help="Tenant name")
+@click.pass_context
+def list_excludes_cmd(ctx: click.Context, tenant: str) -> None:  # type: ignore[override]
+    """List exclude targets for a tenant."""
+    settings: Settings = ctx.obj["settings"]
+    engine = create_sqlite_engine(settings.sqlite_path)
+    with get_session(engine) as s:
+        t = get_tenant_by_name(s, tenant)
+        if not t:
+            console.print(f"Tenant '{tenant}' not found", style="red")
+            sys.exit(1)
+        items = list_tenant_excludes(s, t)
+        table = Table(title=f"Excludes for {t.name}")
+        table.add_column("ID", justify="right")
+        table.add_column("Target")
+        for it in items:
+            table.add_row(str(it.id), it.target)
+        if not items:
+            console.print("(no excludes)", style="yellow")
+        else:
+            console.print(table)
+
+
+@cli.command()
+@click.option("--id", "exclude_id", type=int, required=True, help="Exclude id to edit")
+@click.option("--target", required=True, help="New exclude target")
+@click.pass_context
+def edit_exclude_cmd(ctx: click.Context, exclude_id: int, target: str) -> None:  # type: ignore[override]
+    """Edit an exclude target by id."""
+    settings: Settings = ctx.obj["settings"]
+    logger = ctx.obj.get("logger")
+    engine = create_sqlite_engine(settings.sqlite_path)
+    with get_session(engine) as s:
+        item = get_tenant_exclude_by_id(s, exclude_id)
+        if not item:
+            console.print(f"Exclude id={exclude_id} not found", style="red")
+            sys.exit(1)
+        old = item.target
+        update_tenant_exclude(s, item, target=target)
+        if logger:
+            logger.info("Tenant exclude edited: id=%s %s->%s", item.id, old, item.target)
+        console.print(f"Updated exclude id={item.id}: {old} -> {item.target}")
+
+
+@cli.command()
+@click.option("--id", "exclude_id", type=int, required=True, help="Exclude id to delete")
+@click.option("--yes", is_flag=True, help="Confirm deletion")
+@click.pass_context
+def delete_exclude_cmd(ctx: click.Context, exclude_id: int, yes: bool) -> None:  # type: ignore[override]
+    """Delete an exclude target by id (requires --yes)."""
+    if not yes:
+        console.print("Use --yes to confirm deletion", style="yellow")
+        sys.exit(1)
+    settings: Settings = ctx.obj["settings"]
+    logger = ctx.obj.get("logger")
+    engine = create_sqlite_engine(settings.sqlite_path)
+    with get_session(engine) as s:
+        item = get_tenant_exclude_by_id(s, exclude_id)
+        if not item:
+            console.print(f"Exclude id={exclude_id} not found", style="red")
+            sys.exit(1)
+        tid, target = item.tenant_id, item.target
+        delete_tenant_exclude(s, item)
+        if logger:
+            logger.info("Tenant exclude deleted: tenant_id=%s target=%s", tid, target)
+        console.print(f"Deleted exclude id={exclude_id}")
 
 
 @cli.command()

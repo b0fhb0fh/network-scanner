@@ -9,7 +9,7 @@ from typing import Iterable
 
 from network_scanner.config.settings import Settings
 from network_scanner.config.logging_utils import get_app_logger
-from network_scanner.db.dao import create_sqlite_engine, get_session, init_db, get_tenant_by_name, get_tenant_ports
+from network_scanner.db.dao import create_sqlite_engine, get_session, init_db, get_tenant_by_name, get_tenant_ports, list_tenant_excludes
 from network_scanner.db.models import Scan, Host, Service
 from network_scanner.parsers.nmap_xml import parse_nmap_xml_into_db
 
@@ -61,6 +61,10 @@ def run_scan_for_tenant(settings: Settings, tenant_name: str, mode: str = "tcp",
         mas = masscan.PortScanner()
         host_spec = " ".join(targets)
         extra_args = f"--rate {settings.rate} --open-only"
+        # Apply per-tenant excludes to masscan via --exclude
+        excludes = [it.target for it in list_tenant_excludes(s, tenant)]
+        if excludes:
+            extra_args = f"{extra_args} --exclude {','.join(sorted(set(excludes)))}"
         logger.info("Masscan params: hosts='%s' ports='%s' args='%s'", host_spec, ports_arg, extra_args)
         # python-masscan internally uses JSON output and exposes it as scan_result
         mas.scan(hosts=host_spec, ports=ports_arg, arguments=extra_args)
@@ -180,6 +184,10 @@ def run_scan_for_tenant(settings: Settings, tenant_name: str, mode: str = "tcp",
                     nmap_args.insert(sS_index + 1, "-sV")
                 except ValueError:
                     nmap_args.insert(1, "-sV")
+
+            # Apply per-tenant excludes to nmap via --exclude
+            if excludes:
+                nmap_args += ["--exclude", ",".join(sorted(set(excludes)))]
 
             nmap_args += ["-iL", str(hosts_file)]
             logger.info("Nmap params: %s", " ".join(nmap_args))
