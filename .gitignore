@@ -6,7 +6,6 @@ __pycache__/
 *.log
 *.tgz
 *.xml
-*.txt
 venv/
 .venv/
 env/
