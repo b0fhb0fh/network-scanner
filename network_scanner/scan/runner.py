@@ -168,6 +168,10 @@ def run_scan_for_tenant(settings: Settings, tenant_name: str, mode: str = "tcp",
                 logger.info("Scan finished: tenant=%s no ports to probe with nmap", tenant.name)
                 return
 
+            # Добавим аргумент --exclude-ports если задан в конфиге
+            if settings.exclude_ports:
+                nmap_args += ["--exclude-ports", settings.exclude_ports]
+
             # Optionally enable service/version detection
             if service_info and "-sV" not in nmap_args:
                 # Put -sV right after -sS if present, else near the start

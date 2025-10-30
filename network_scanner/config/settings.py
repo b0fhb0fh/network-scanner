@@ -13,6 +13,7 @@ class Settings:
     rate: int = 2048
     nmap_path: str = "nmap"
     tcp_ports_default: Optional[str] = None
+    exclude_ports: Optional[str] = None
 
     @staticmethod
     def load(config_path: Optional[str] = None) -> "Settings":
@@ -59,6 +60,8 @@ class Settings:
                 settings.nmap_path = str(file_cfg["nmap_path"])  # type: ignore[assignment]
             if "tcp_ports_default" in file_cfg:
                 settings.tcp_ports_default = (file_cfg["tcp_ports_default"].strip() or None)  # type: ignore[assignment]
+            if "exclude_ports" in file_cfg:
+                settings.exclude_ports = (file_cfg["exclude_ports"].strip() or None)  # type: ignore[assignment]
 
         # 3) Override from environment variables if present
         env_overrides = {
@@ -70,6 +73,9 @@ class Settings:
             "tcp_ports_default": os.environ.get("NETWORK_SCANNER_TCP_PORTS_DEFAULT")
                 or os.environ.get("TCP_PORTS_DEFAULT")
                 or os.environ.get("tcp_ports_default"),
+            "exclude_ports": os.environ.get("NETWORK_SCANNER_EXCLUDE_PORTS")
+                or os.environ.get("EXCLUDE_PORTS")
+                or os.environ.get("exclude_ports"),
         }
         if env_overrides["sqlite_path"]:
             settings.sqlite_path = Path(str(env_overrides["sqlite_path"]))  # type: ignore[assignment]
@@ -84,6 +90,8 @@ class Settings:
             settings.nmap_path = str(env_overrides["nmap_path"])  # type: ignore[assignment]
         if env_overrides["tcp_ports_default"]:
             settings.tcp_ports_default = (str(env_overrides["tcp_ports_default"]).strip() or None)  # type: ignore[assignment]
+        if env_overrides["exclude_ports"]:
+            settings.exclude_ports = (str(env_overrides["exclude_ports"]).strip() or None)  # type: ignore[assignment]
 
         settings.data_dir.mkdir(parents=True, exist_ok=True)
         return settings

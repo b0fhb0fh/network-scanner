@@ -30,6 +30,7 @@ pip install -r requirements.txt
 - Скорость masscan: `rate` | `NETWORK_SCANNER_RATE` | `RATE` (по умолчанию `2048`)
 - Путь к `nmap`: `nmap_path` | `NETWORK_SCANNER_NMAP` | `NMAP_PATH` (по умолчанию `nmap`)
 - TCP‑порты по умолчанию: `tcp_ports_default` | `NETWORK_SCANNER_TCP_PORTS_DEFAULT` | `TCP_PORTS_DEFAULT`
+- Исключаемые TCP‑порты из nmap: `exclude_ports` | `NETWORK_SCANNER_EXCLUDE_PORTS` | `EXCLUDE_PORTS`
 
 Пример `.env`:
 ```ini
@@ -38,6 +39,7 @@ data_dir=./data
 rate=4096
 nmap_path=nmap
 tcp_ports_default=22,80,443
+exclude_ports=5900,12345
 ```
 
 ### CLI
@@ -106,6 +108,7 @@ python cli.py --config ./settings.yaml scan --tenant ACME
 - `python-masscan` требует установленный системный бинарник `masscan`.
 - Для высоких значений `--rate` необходимы соответствующие права и конфигурация сети.
 - На некоторых ОС может потребоваться запуск с повышенными привилегиями для сырого трафика.
+- `exclude_ports` — (список через запятую) эти порты будут исключены nmap, аргумент `--exclude-ports`. Можно задать через переменные окружения или конфиг-файл. Если не задан — не применяется.
 
 ### Разработка
 Запуск линтера/форматирования зависит от ваших инструментов. В проекте используется `ruff` (см. `pyproject.toml`).
