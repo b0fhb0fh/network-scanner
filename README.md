@@ -86,6 +86,10 @@ python cli.py scan --tenant ACME --mode all
 
 # Определение названий и версий сервисов (-sV)
 python cli.py scan --tenant ACME --mode tcp --service-info
+
+# Сканирование по списку целей из файла (masscan -iL)
+# В этом режиме цели берутся из файла, а не из БД тенанта
+python cli.py scan --tenant ACME --mode tcp --iL ./targets.txt
 ```
 
 - Управление исключениями (адреса/подсети/хостнеймы), применяются к Masscan и Nmap через `--exclude`:
@@ -116,6 +120,7 @@ python cli.py --config ./settings.yaml scan --tenant ACME
 - `--service-info` — добавляет `-sV` к `nmap` для определения названий и версий сервисов.
 - Исключения на уровне арендатора применяются автоматически: к Masscan (`--exclude`) и к Nmap (`--exclude`).
 - `exclude_ports` — глобальный параметр (конфиг/ENV) для Nmap `--exclude-ports` (исключение TCP‑портов).
+- `--iL <file>` — передаёт список целей в Masscan через `-iL <file>`. В этом режиме цели не берутся из сетей в БД.
 
 ### Как это работает
 1. Быстрый проход выполняется через `python-masscan` (TCP), где задаются цели (CIDR/адреса), порты и ограничение скорости (`--rate`). При наличии исключений арендатора — используются `--exclude`.

@@ -644,15 +644,19 @@ def list_networks_cmd(ctx: click.Context, tenant: Optional[str]) -> None:  # typ
 @click.option("--tenant", required=True, help="Tenant name to scan")
 @click.option("--mode", type=click.Choice(["tcp", "all"]), default="tcp")
 @click.option("--service-info", is_flag=True, help="Enable nmap service/version detection (-sV)")
+@click.option("--iL", "input_list", type=click.Path(path_type=Path, exists=True, dir_okay=False), required=False, help="File with targets for masscan (-iL). If set, targets are taken from file, not from DB")
 @click.pass_context
-def scan_cmd(ctx: click.Context, tenant: str, mode: str, service_info: bool) -> None:  # type: ignore[override]
-    """Run a scan for a tenant (TCP only). Use --mode all for 1-65535; add --service-info to enable nmap -sV."""
+def scan_cmd(ctx: click.Context, tenant: str, mode: str, service_info: bool, input_list: Optional[Path]) -> None:  # type: ignore[override]
+    """Run a scan for a tenant (TCP only). Use --mode all for 1-65535; add --service-info to enable nmap -sV.
+
+    If --iL is provided, masscan will read targets from the specified file (and not from tenant networks).
+    """
     from network_scanner.scan.runner import run_scan_for_tenant
 
     settings: Settings = ctx.obj["settings"]
     logger = ctx.obj.get("logger")
     if logger:
-        logger.info("Scan requested: tenant=%s mode=%s service_info=%s", tenant, mode, service_info)
-    run_scan_for_tenant(settings, tenant_name=tenant, mode=mode, service_info=service_info)
+        logger.info("Scan requested: tenant=%s mode=%s service_info=%s iL=%s", tenant, mode, service_info, str(input_list) if input_list else "")
+    run_scan_for_tenant(settings, tenant_name=tenant, mode=mode, service_info=service_info, input_list=input_list)
 
 
