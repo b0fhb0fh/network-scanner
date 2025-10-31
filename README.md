@@ -10,7 +10,7 @@
 
 ### Требования
 - Python 3.10+
-- Установленный бинарник `nmap` в PATH (например, на macOS: `brew install nmap`).
+- Установленные бинарники `nmap` и `masscan` в PATH (например, на macOS: `brew install nmap masscan`).
 
 ### Установка
 ```bash
