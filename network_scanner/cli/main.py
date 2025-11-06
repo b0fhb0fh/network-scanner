@@ -641,18 +641,49 @@ def list_networks_cmd(ctx: click.Context, tenant: Optional[str]) -> None:  # typ
 
 # Placeholder for scan command; implemented after runner and parser are ready
 @cli.command()
-@click.option("--tenant", required=True, help="Tenant name to scan")
+@click.option("--tenant", required=False, default=None, help="Tenant name to scan (omit with --all-tenants)")
 @click.option("--mode", type=click.Choice(["tcp", "all"]), default="tcp")
 @click.option("--service-info", is_flag=True, help="Enable nmap service/version detection (-sV)")
+@click.option("--iL", "input_list", type=click.Path(path_type=Path, exists=True, dir_okay=False), required=False, help="File with targets for masscan (-iL). If set, targets are taken from file, not from DB")
+@click.option("--all-tenants", is_flag=True, help="Scan all tenants sequentially with their individual settings")
 @click.pass_context
-def scan_cmd(ctx: click.Context, tenant: str, mode: str, service_info: bool) -> None:  # type: ignore[override]
-    """Run a scan for a tenant (TCP only). Use --mode all for 1-65535; add --service-info to enable nmap -sV."""
+def scan_cmd(ctx: click.Context, tenant: Optional[str], mode: str, service_info: bool, input_list: Optional[Path], all_tenants: bool) -> None:  # type: ignore[override]
+    """Run scan(s).
+
+    - Single tenant: specify --tenant NAME
+    - All tenants: use --all-tenants (tenant is ignored)
+    - If --iL is provided, masscan will read targets from the specified file (not from tenant networks) — only valid for single-tenant scans.
+    """
     from network_scanner.scan.runner import run_scan_for_tenant
 
     settings: Settings = ctx.obj["settings"]
     logger = ctx.obj.get("logger")
+    engine = create_sqlite_engine(settings.sqlite_path)
+    init_db(engine)
+
+    if all_tenants:
+        if input_list is not None:
+            console.print("--iL cannot be used together with --all-tenants", style="red")
+            sys.exit(1)
+        # iterate all tenants
+        with get_session(engine) as s:
+            tenants = list_tenants(s)
+            if not tenants:
+                console.print("No tenants found", style="yellow")
+                return
+            for t in tenants:
+                if logger:
+                    logger.info("Scan requested (all-tenants): tenant=%s mode=%s service_info=%s", t.name, mode, service_info)
+                # Run per tenant
+                run_scan_for_tenant(settings, tenant_name=t.name, mode=mode, service_info=service_info, input_list=None)
+        return
+
+    # Single-tenant path
+    if not tenant:
+        console.print("--tenant is required unless --all-tenants is specified", style="red")
+        sys.exit(1)
     if logger:
-        logger.info("Scan requested: tenant=%s mode=%s service_info=%s", tenant, mode, service_info)
-    run_scan_for_tenant(settings, tenant_name=tenant, mode=mode, service_info=service_info)
+        logger.info("Scan requested: tenant=%s mode=%s service_info=%s iL=%s", tenant, mode, service_info, str(input_list) if input_list else "")
+    run_scan_for_tenant(settings, tenant_name=tenant, mode=mode, service_info=service_info, input_list=input_list)
 
 

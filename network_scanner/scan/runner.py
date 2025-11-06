@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 from typing import Iterable
+from typing import Optional
 
 from network_scanner.config.settings import Settings
 from network_scanner.config.logging_utils import get_app_logger
@@ -19,7 +20,7 @@ def _run(cmd: list[str], cwd: Path | None = None) -> None:
     if proc.returncode != 0:
         raise RuntimeError(f"Command failed: {' '.join(cmd)}\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}")
 
-def run_scan_for_tenant(settings: Settings, tenant_name: str, mode: str = "tcp", service_info: bool = False) -> None:
+def run_scan_for_tenant(settings: Settings, tenant_name: str, mode: str = "tcp", service_info: bool = False, input_list: Optional[Path] = None) -> None:
     import masscan  # python-masscan
 
     engine = create_sqlite_engine(settings.sqlite_path)
@@ -38,11 +39,16 @@ def run_scan_for_tenant(settings: Settings, tenant_name: str, mode: str = "tcp",
         date_dir.mkdir(parents=True, exist_ok=True)
         
         # Compose masscan parameters
-        targets: list[str] = [n.cidr for n in tenant.networks]
-        if not targets:
+        targets: list[str] = [] if input_list else [n.cidr for n in tenant.networks]
+        if input_list is None and not targets:
             scan.status = "failed"
             raise ValueError("No networks configured for this tenant")
-        logger.info("Scan started: tenant=%s mode=%s targets=%s", tenant.name, mode, ",".join(targets))
+        logger.info(
+            "Scan started: tenant=%s mode=%s %s",
+            tenant.name,
+            mode,
+            (f"iL={input_list}" if input_list else f"targets={','.join(targets)}"),
+        )
         # Per-tenant port configuration (overrides defaults if present)
         cfg = get_tenant_ports(s, tenant)
         if mode == "all":
@@ -59,13 +65,15 @@ def run_scan_for_tenant(settings: Settings, tenant_name: str, mode: str = "tcp",
 
         # Use python-masscan to perform the fast scan
         mas = masscan.PortScanner()
-        host_spec = " ".join(targets)
+        host_spec = " ".join(targets) if not input_list else ""
         extra_args = f"--rate {settings.rate} --open-only"
         # Apply per-tenant excludes to masscan via --exclude
         excludes = [it.target for it in list_tenant_excludes(s, tenant)]
         if excludes:
             extra_args = f"{extra_args} --exclude {','.join(sorted(set(excludes)))}"
-        logger.info("Masscan params: hosts='%s' ports='%s' args='%s'", host_spec, ports_arg, extra_args)
+        if input_list:
+            extra_args = f"{extra_args} -iL {str(input_list)}"
+        logger.info("Masscan params: hosts='%s' ports='%s' args='%s'", host_spec or "(from -iL)", ports_arg, extra_args)
         # python-masscan internally uses JSON output and exposes it as scan_result
         mas.scan(hosts=host_spec, ports=ports_arg, arguments=extra_args)
         raw_result = getattr(mas, "scan_result", {}) or {}
