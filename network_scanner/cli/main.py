@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import sys
-import textwrap
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -45,6 +44,16 @@ from sqlalchemy import select, desc
 
 console = Console()
 
+PDF_TABLE_WIDTH = 110
+
+
+def _table_to_ascii(table: Table, width: int = PDF_TABLE_WIDTH) -> str:
+    capture_console = Console(width=width, record=True)
+    capture_console.print(table)
+    text = capture_console.export_text(clear=False)
+    capture_console.clear()
+    return text.rstrip()
+
 
 def _sanitize_filename_component(value: str) -> str:
     allowed = {"-", "_"}
@@ -70,7 +79,7 @@ def _export_pdf_report(
     report_type: str,
     scan_dt: datetime | None,
     title: str,
-    sections: list[tuple[str, list[str]]],
+    blocks: list[str],
 ) -> Path:
     FPDF_cls = _load_fpdf()
     pdf_path = _build_pdf_path(settings, tenant_name, report_type, scan_dt)
@@ -85,22 +94,16 @@ def _export_pdf_report(
         pdf.cell(0, 8, f"Scan started: {scan_dt.replace(microsecond=0).isoformat(sep=' ')}", ln=True)
     pdf.ln(4)
 
-    usable_width = getattr(pdf, "epw", pdf.w - pdf.l_margin - pdf.r_margin)
+    line_height = 4.5
 
-    for heading, lines in sections:
-        pdf.set_font("Helvetica", "B", 13)
-        pdf.set_x(pdf.l_margin)
-        pdf.cell(0, 8, heading, ln=True)
-        pdf.set_font("Helvetica", size=11)
-        if not lines:
+    for block in blocks:
+        if not block:
+            continue
+        pdf.set_font("Courier", size=9)
+        for raw_line in block.splitlines():
+            line = raw_line.rstrip()
             pdf.set_x(pdf.l_margin)
-            pdf.cell(0, 6, "(no data)", ln=True)
-        else:
-            for line in lines:
-                wrapped = textwrap.wrap(line, width=100) or [""]
-                for item in wrapped:
-                    pdf.set_x(pdf.l_margin)
-                    pdf.multi_cell(usable_width, 6, item or " ")
+            pdf.cell(0, line_height, line if line else " ", ln=True)
         pdf.ln(2)
 
     pdf.output(str(pdf_path))
@@ -524,22 +527,11 @@ def show_last_scan_cmd(ctx: click.Context, tenant: str, pdf: bool) -> None:  # t
         scan_table.add_row("Status", last_scan.status)
         scan_table.add_row("Started", _fmt_dt(last_scan.started_at))
         scan_table.add_row("Finished", _fmt_dt(last_scan.finished_at) if last_scan.finished_at else "N/A")
+        scan_table_text = _table_to_ascii(scan_table)
         console.print(scan_table)
         console.print()
 
-        pdf_sections: list[tuple[str, list[str]]] = []
-        pdf_sections.append(
-            (
-                "Scan Info",
-                [
-                    f"Scan ID: {last_scan.id}",
-                    f"Mode: {last_scan.mode}",
-                    f"Status: {last_scan.status}",
-                    f"Started: {_fmt_dt(last_scan.started_at)}",
-                    f"Finished: {_fmt_dt(last_scan.finished_at) if last_scan.finished_at else 'N/A'}",
-                ],
-            )
-        )
+        pdf_blocks: list[str] = [scan_table_text]
 
         # Display hosts and services
         for host in hosts:
@@ -557,7 +549,6 @@ def show_last_scan_cmd(ctx: click.Context, tenant: str, pdf: bool) -> None:  # t
                 .order_by(Service.port, Service.protocol)
             ).all()
 
-            pdf_host_lines: list[str] = []
             if services:
                 for svc in services:
                     host_table.add_row(
@@ -568,16 +559,13 @@ def show_last_scan_cmd(ctx: click.Context, tenant: str, pdf: bool) -> None:  # t
                         svc.version or "",
                         (_fmt_dt(svc.time_discovery) if svc.time_discovery else "N/A")
                     )
-                    pdf_host_lines.append(
-                        f"{svc.protocol}/{svc.port}: {svc.name or ''} {svc.product or ''} {svc.version or ''}".strip()
-                    )
             else:
                 host_table.add_row("No services", "", "", "", "", "")
-                pdf_host_lines.append("No services")
 
+            host_table_text = _table_to_ascii(host_table)
             console.print(host_table)
             console.print()
-            pdf_sections.append((f"Host {host.ip} ({host.hostname or 'No hostname'})", pdf_host_lines))
+            pdf_blocks.append(host_table_text)
 
         if pdf:
             scan_dt = last_scan.started_at if isinstance(last_scan.started_at, datetime) else None
@@ -587,7 +575,7 @@ def show_last_scan_cmd(ctx: click.Context, tenant: str, pdf: bool) -> None:  # t
                 report_type="last-scan",
                 scan_dt=scan_dt,
                 title=f"Last Scan Report: {t.name}",
-                sections=pdf_sections,
+                blocks=pdf_blocks,
             )
             console.print(f"PDF saved to {pdf_path}")
             if logger:
@@ -667,21 +655,11 @@ def diff_scans_cmd(ctx: click.Context, tenant: str, pdf: bool) -> None:  # type:
         info_table.add_row("Newer Started", _fmt_dt(newer.started_at))
         info_table.add_row("Older Scan ID", str(older.id))
         info_table.add_row("Older Started", _fmt_dt(older.started_at))
+        info_table_text = _table_to_ascii(info_table)
         console.print(info_table)
         console.print()
 
-        pdf_sections: list[tuple[str, list[str]]] = []
-        pdf_sections.append(
-            (
-                "Scans Compared",
-                [
-                    f"Newer Scan ID: {newer.id}",
-                    f"Newer Started: {_fmt_dt(newer.started_at)}",
-                    f"Older Scan ID: {older.id}",
-                    f"Older Started: {_fmt_dt(older.started_at)}",
-                ],
-            )
-        )
+        pdf_blocks: list[str] = [info_table_text]
 
         # Hosts added/removed
         if hosts_added or hosts_removed:
@@ -692,18 +670,18 @@ def diff_scans_cmd(ctx: click.Context, tenant: str, pdf: bool) -> None:  # type:
                 hr_table.add_row("Added", ", ".join(hosts_added))
             if hosts_removed:
                 hr_table.add_row("Removed", ", ".join(hosts_removed))
+            hr_table_text = _table_to_ascii(hr_table)
             console.print(hr_table)
             console.print()
-            changes_lines: list[str] = []
-            if hosts_added:
-                changes_lines.append(f"Added: {', '.join(hosts_added)}")
-            if hosts_removed:
-                changes_lines.append(f"Removed: {', '.join(hosts_removed)}")
-            pdf_sections.append(("Host Changes", changes_lines))
+            pdf_blocks.append(hr_table_text)
         else:
             console.print("No host changes", style="green")
             console.print()
-            pdf_sections.append(("Host Changes", ["No host changes"]))
+            hr_table = Table(title="Hosts changes")
+            hr_table.add_column("Type")
+            hr_table.add_column("Hosts")
+            hr_table.add_row("Info", "No host changes")
+            pdf_blocks.append(_table_to_ascii(hr_table))
 
         # Port diffs for common hosts
         any_port_changes = False
@@ -728,26 +706,18 @@ def diff_scans_cmd(ctx: click.Context, tenant: str, pdf: bool) -> None:  # type:
                     "Closed",
                     ", ".join(f"{proto}:{port}" for proto, port in removed_ports),
                 )
+            ht_text = _table_to_ascii(ht)
             console.print(ht)
             console.print()
-
-            port_lines: list[str] = []
-            if added_ports:
-                port_lines.append(
-                    "Opened: "
-                    + ", ".join(f"{proto}:{port}" for proto, port in added_ports)
-                )
-            if removed_ports:
-                port_lines.append(
-                    "Closed: "
-                    + ", ".join(f"{proto}:{port}" for proto, port in removed_ports)
-                )
-            pdf_sections.append((f"Port Changes for {ip}", port_lines))
+            pdf_blocks.append(ht_text)
 
         if not any_port_changes:
             console.print("No port changes on common hosts", style="green")
             console.print()
-            pdf_sections.append(("Port Changes", ["No port changes on common hosts"]))
+            port_table = Table(title="Port Changes")
+            port_table.add_column("Info")
+            port_table.add_row("No port changes on common hosts")
+            pdf_blocks.append(_table_to_ascii(port_table))
 
         if pdf:
             scan_dt = newer.started_at if isinstance(newer.started_at, datetime) else None
@@ -757,7 +727,7 @@ def diff_scans_cmd(ctx: click.Context, tenant: str, pdf: bool) -> None:  # type:
                 report_type="diff-scans",
                 scan_dt=scan_dt,
                 title=f"Scan Diff Report: {t.name}",
-                sections=pdf_sections,
+                blocks=pdf_blocks,
             )
             console.print(f"PDF saved to {pdf_path}")
             if logger:
