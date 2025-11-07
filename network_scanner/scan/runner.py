@@ -20,7 +20,14 @@ def _run(cmd: list[str], cwd: Path | None = None) -> None:
     if proc.returncode != 0:
         raise RuntimeError(f"Command failed: {' '.join(cmd)}\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}")
 
-def run_scan_for_tenant(settings: Settings, tenant_name: str, mode: str = "tcp", service_info: bool = False, input_list: Optional[Path] = None) -> None:
+def run_scan_for_tenant(
+    settings: Settings,
+    tenant_name: str,
+    mode: str = "tcp",
+    service_info: bool = False,
+    input_list: Optional[Path] = None,
+    rate_override: Optional[int] = None,
+) -> None:
     import masscan  # python-masscan
 
     engine = create_sqlite_engine(settings.sqlite_path)
@@ -64,16 +71,22 @@ def run_scan_for_tenant(settings: Settings, tenant_name: str, mode: str = "tcp",
                 logger.info("No tenant TCP ports or default configured; falling back to 1-65535")
 
         # Use python-masscan to perform the fast scan
+        mascan_rate = rate_override if rate_override is not None else settings.rate
         mas = masscan.PortScanner()
         host_spec = " ".join(targets) if not input_list else ""
-        extra_args = f"--rate {settings.rate} --open-only"
+        extra_args = f"--rate {mascan_rate} --open-only"
         # Apply per-tenant excludes to masscan via --exclude
         excludes = [it.target for it in list_tenant_excludes(s, tenant)]
         if excludes:
             extra_args = f"{extra_args} --exclude {','.join(sorted(set(excludes)))}"
         if input_list:
             extra_args = f"{extra_args} -iL {str(input_list)}"
-        logger.info("Masscan params: hosts='%s' ports='%s' args='%s'", host_spec or "(from -iL)", ports_arg, extra_args)
+        logger.info(
+            "Masscan params: hosts='%s' ports='%s' args='%s'",
+            host_spec or "(from -iL)",
+            ports_arg,
+            extra_args,
+        )
         # python-masscan internally uses JSON output and exposes it as scan_result
         mas.scan(hosts=host_spec, ports=ports_arg, arguments=extra_args)
         raw_result = getattr(mas, "scan_result", {}) or {}

@@ -11,6 +11,7 @@
 ### Требования
 - Python 3.10+
 - Установленные бинарники `nmap` и `masscan` в PATH (например, на macOS: `brew install nmap masscan`).
+- Python-зависимости из `requirements.txt` (включая `fpdf2` для экспорта PDF).
 
 ### Установка
 ```bash
@@ -93,6 +94,9 @@ python cli.py scan --tenant ACME --mode tcp --iL ./targets.txt
 
 # Сканирование всех тенантов по очереди с учётом их настроек
 python cli.py scan --all-tenants --mode tcp
+
+# Переопределить скорость masscan на один запуск
+python cli.py scan --tenant ACME --mode tcp --rate 5000
 ```
 
 - Управление исключениями (адреса/подсети/хостнеймы), применяются к Masscan и Nmap через `--exclude`:
@@ -112,6 +116,18 @@ python cli.py edit-exclude --id 3 --target 10.0.2.0/24
 python cli.py delete-exclude --id 3 --yes
 ```
 
+- Просмотр последнего скана и экспорт в PDF:
+```bash
+python cli.py show-last-scan --tenant ACME
+python cli.py show-last-scan --tenant ACME --pdf  # PDF отчёт в data/<tenant>/reports
+```
+
+- Сравнение двух последних сканов и экспорт в PDF:
+```bash
+python cli.py diff-scans --tenant ACME
+python cli.py diff-scans --tenant ACME --pdf  # PDF отчёт в data/<tenant>/reports
+```
+
 Пример с конфигом:
 ```bash
 python cli.py --config ./settings.yaml scan --tenant ACME
@@ -125,6 +141,8 @@ python cli.py --config ./settings.yaml scan --tenant ACME
 - `exclude_ports` — глобальный параметр (конфиг/ENV) для Nmap `--exclude-ports` (исключение TCP‑портов).
 - `--iL <file>` — передаёт список целей в Masscan через `-iL <file>`. В этом режиме цели не берутся из сетей в БД.
 - `--all-tenants` — последовательно запускает сканирование для всех арендаторов с их индивидуальными настройками (сети, исключения и т. п.). Несовместимо с `--iL`.
+- `--rate <value>` — переопределяет скорость masscan для текущего запуска (по умолчанию берётся `rate` из настроек).
+- `--pdf` (в командах `show-last-scan`, `diff-scans`) — сохраняет PDF-отчёт в директорию `data/<tenant>/reports/`, имя файла содержит название тенанта, тип отчёта и время сканирования.
 
 ### Как это работает
 1. Быстрый проход выполняется через `python-masscan` (TCP), где задаются цели (CIDR/адреса), порты и ограничение скорости (`--rate`). При наличии исключений арендатора — используются `--exclude`.
@@ -134,6 +152,7 @@ python cli.py --config ./settings.yaml scan --tenant ACME
 Артефакты и отчеты складываются в `data/<tenant>/<YYYYMMDD>/`:
 - `masscan.json` — полный JSON‑ответ Masscan
 - `nmap.xml` — результат Nmap (для парсинга в БД)
+- PDF-отчёты (если экспортированы через `--pdf`) сохраняются в `data/<tenant>/reports/`.
 
 ### Тонкости и ограничения
 - `python-masscan` требует установленный системный бинарник `masscan`.

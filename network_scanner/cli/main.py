@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import sys
+import textwrap
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 import click
 from rich.console import Console
 from rich.table import Table
+
+import importlib
 
 from network_scanner.config.settings import Settings
 from network_scanner.config.logging_utils import get_app_logger
@@ -40,6 +44,78 @@ from sqlalchemy import select, desc
 
 
 console = Console()
+
+
+def _sanitize_filename_component(value: str) -> str:
+    allowed = {"-", "_"}
+    return "".join(c if c.isalnum() or c in allowed else "_" for c in value)
+
+
+def _build_pdf_path(settings: Settings, tenant_name: str, report_type: str, scan_dt: datetime | None) -> Path:
+    tenant_dir = settings.data_dir / tenant_name
+    base_dir = tenant_dir / "reports"
+    base_dir.mkdir(parents=True, exist_ok=True)
+    ts = (
+        scan_dt.strftime("%Y%m%d_%H%M%S")
+        if isinstance(scan_dt, datetime)
+        else datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    )
+    filename = f"{_sanitize_filename_component(tenant_name)}_{report_type}_{ts}.pdf"
+    return base_dir / filename
+
+
+def _export_pdf_report(
+    settings: Settings,
+    tenant_name: str,
+    report_type: str,
+    scan_dt: datetime | None,
+    title: str,
+    sections: list[tuple[str, list[str]]],
+) -> Path:
+    FPDF_cls = _load_fpdf()
+    pdf_path = _build_pdf_path(settings, tenant_name, report_type, scan_dt)
+    pdf = FPDF_cls()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+    pdf.set_font("Helvetica", "B", 16)
+    pdf.cell(0, 10, title, ln=True)
+    pdf.set_font("Helvetica", size=12)
+    pdf.cell(0, 8, f"Tenant: {tenant_name}", ln=True)
+    if isinstance(scan_dt, datetime):
+        pdf.cell(0, 8, f"Scan started: {scan_dt.replace(microsecond=0).isoformat(sep=' ')}", ln=True)
+    pdf.ln(4)
+
+    usable_width = getattr(pdf, "epw", pdf.w - pdf.l_margin - pdf.r_margin)
+
+    for heading, lines in sections:
+        pdf.set_font("Helvetica", "B", 13)
+        pdf.set_x(pdf.l_margin)
+        pdf.cell(0, 8, heading, ln=True)
+        pdf.set_font("Helvetica", size=11)
+        if not lines:
+            pdf.set_x(pdf.l_margin)
+            pdf.cell(0, 6, "(no data)", ln=True)
+        else:
+            for line in lines:
+                wrapped = textwrap.wrap(line, width=100) or [""]
+                for item in wrapped:
+                    pdf.set_x(pdf.l_margin)
+                    pdf.multi_cell(usable_width, 6, item or " ")
+        pdf.ln(2)
+
+    pdf.output(str(pdf_path))
+    return pdf_path
+
+
+def _load_fpdf():
+    try:
+        module = importlib.import_module("fpdf")
+        FPDF_cls = getattr(module, "FPDF")
+    except Exception as exc:  # pragma: no cover
+        raise RuntimeError(
+            "PDF export requires 'fpdf2' package. Install it to enable --pdf option."
+        ) from exc
+    return FPDF_cls
 
 
 def _fmt_dt(dt: object) -> str:
@@ -404,8 +480,9 @@ def show_ports_cmd(ctx: click.Context, tenant: str) -> None:  # type: ignore[ove
 
 @cli.command()
 @click.option("--tenant", required=True, help="Tenant name")
+@click.option("--pdf", is_flag=True, help="Export report to PDF (data_dir/reports/<tenant>_last-scan_<time>.pdf)")
 @click.pass_context
-def show_last_scan_cmd(ctx: click.Context, tenant: str) -> None:  # type: ignore[override]
+def show_last_scan_cmd(ctx: click.Context, tenant: str, pdf: bool) -> None:  # type: ignore[override]
     """Display results of the most recent scan for a tenant."""
     settings: Settings = ctx.obj["settings"]
     logger = ctx.obj.get("logger")
@@ -429,7 +506,7 @@ def show_last_scan_cmd(ctx: click.Context, tenant: str) -> None:  # type: ignore
             return
 
         if logger:
-            logger.info("Showing last scan results: tenant=%s scan_id=%s", tenant, last_scan.id)
+            logger.info("Showing last scan results: tenant=%s scan_id=%s pdf=%s", tenant, last_scan.id, pdf)
 
         # Get hosts for this scan
         hosts = s.scalars(select(Host).where(Host.scan_id == last_scan.id).order_by(Host.ip)).all()
@@ -450,6 +527,20 @@ def show_last_scan_cmd(ctx: click.Context, tenant: str) -> None:  # type: ignore
         console.print(scan_table)
         console.print()
 
+        pdf_sections: list[tuple[str, list[str]]] = []
+        pdf_sections.append(
+            (
+                "Scan Info",
+                [
+                    f"Scan ID: {last_scan.id}",
+                    f"Mode: {last_scan.mode}",
+                    f"Status: {last_scan.status}",
+                    f"Started: {_fmt_dt(last_scan.started_at)}",
+                    f"Finished: {_fmt_dt(last_scan.finished_at) if last_scan.finished_at else 'N/A'}",
+                ],
+            )
+        )
+
         # Display hosts and services
         for host in hosts:
             host_table = Table(title=f"Host: {host.ip} ({host.hostname or 'No hostname'})")
@@ -466,6 +557,7 @@ def show_last_scan_cmd(ctx: click.Context, tenant: str) -> None:  # type: ignore
                 .order_by(Service.port, Service.protocol)
             ).all()
 
+            pdf_host_lines: list[str] = []
             if services:
                 for svc in services:
                     host_table.add_row(
@@ -476,17 +568,37 @@ def show_last_scan_cmd(ctx: click.Context, tenant: str) -> None:  # type: ignore
                         svc.version or "",
                         (_fmt_dt(svc.time_discovery) if svc.time_discovery else "N/A")
                     )
+                    pdf_host_lines.append(
+                        f"{svc.protocol}/{svc.port}: {svc.name or ''} {svc.product or ''} {svc.version or ''}".strip()
+                    )
             else:
                 host_table.add_row("No services", "", "", "", "", "")
+                pdf_host_lines.append("No services")
 
             console.print(host_table)
             console.print()
+            pdf_sections.append((f"Host {host.ip} ({host.hostname or 'No hostname'})", pdf_host_lines))
+
+        if pdf:
+            scan_dt = last_scan.started_at if isinstance(last_scan.started_at, datetime) else None
+            pdf_path = _export_pdf_report(
+                settings,
+                tenant_name=t.name,
+                report_type="last-scan",
+                scan_dt=scan_dt,
+                title=f"Last Scan Report: {t.name}",
+                sections=pdf_sections,
+            )
+            console.print(f"PDF saved to {pdf_path}")
+            if logger:
+                logger.info("Last scan PDF generated: tenant=%s path=%s", t.name, pdf_path)
 
 
 @cli.command()
 @click.option("--tenant", required=True, help="Tenant name")
+@click.option("--pdf", is_flag=True, help="Export diff report to PDF (data_dir/reports/<tenant>_diff-scans_<time>.pdf)")
 @click.pass_context
-def diff_scans_cmd(ctx: click.Context, tenant: str) -> None:  # type: ignore[override]
+def diff_scans_cmd(ctx: click.Context, tenant: str, pdf: bool) -> None:  # type: ignore[override]
     """Show differences between the last two scans for a tenant (hosts and ports)."""
     settings: Settings = ctx.obj["settings"]
     logger = ctx.obj.get("logger")
@@ -510,10 +622,11 @@ def diff_scans_cmd(ctx: click.Context, tenant: str) -> None:  # type: ignore[ove
         newer, older = scans[0], scans[1]
         if logger:
             logger.info(
-                "Diff scans requested: tenant=%s newer_id=%s older_id=%s",
+                "Diff scans requested: tenant=%s newer_id=%s older_id=%s pdf=%s",
                 tenant,
                 newer.id,
                 older.id,
+                pdf,
             )
 
         # Load hosts for both scans
@@ -557,6 +670,19 @@ def diff_scans_cmd(ctx: click.Context, tenant: str) -> None:  # type: ignore[ove
         console.print(info_table)
         console.print()
 
+        pdf_sections: list[tuple[str, list[str]]] = []
+        pdf_sections.append(
+            (
+                "Scans Compared",
+                [
+                    f"Newer Scan ID: {newer.id}",
+                    f"Newer Started: {_fmt_dt(newer.started_at)}",
+                    f"Older Scan ID: {older.id}",
+                    f"Older Started: {_fmt_dt(older.started_at)}",
+                ],
+            )
+        )
+
         # Hosts added/removed
         if hosts_added or hosts_removed:
             hr_table = Table(title="Hosts changes")
@@ -568,9 +694,16 @@ def diff_scans_cmd(ctx: click.Context, tenant: str) -> None:  # type: ignore[ove
                 hr_table.add_row("Removed", ", ".join(hosts_removed))
             console.print(hr_table)
             console.print()
+            changes_lines: list[str] = []
+            if hosts_added:
+                changes_lines.append(f"Added: {', '.join(hosts_added)}")
+            if hosts_removed:
+                changes_lines.append(f"Removed: {', '.join(hosts_removed)}")
+            pdf_sections.append(("Host Changes", changes_lines))
         else:
             console.print("No host changes", style="green")
             console.print()
+            pdf_sections.append(("Host Changes", ["No host changes"]))
 
         # Port diffs for common hosts
         any_port_changes = False
@@ -598,9 +731,37 @@ def diff_scans_cmd(ctx: click.Context, tenant: str) -> None:  # type: ignore[ove
             console.print(ht)
             console.print()
 
+            port_lines: list[str] = []
+            if added_ports:
+                port_lines.append(
+                    "Opened: "
+                    + ", ".join(f"{proto}:{port}" for proto, port in added_ports)
+                )
+            if removed_ports:
+                port_lines.append(
+                    "Closed: "
+                    + ", ".join(f"{proto}:{port}" for proto, port in removed_ports)
+                )
+            pdf_sections.append((f"Port Changes for {ip}", port_lines))
+
         if not any_port_changes:
             console.print("No port changes on common hosts", style="green")
             console.print()
+            pdf_sections.append(("Port Changes", ["No port changes on common hosts"]))
+
+        if pdf:
+            scan_dt = newer.started_at if isinstance(newer.started_at, datetime) else None
+            pdf_path = _export_pdf_report(
+                settings,
+                tenant_name=t.name,
+                report_type="diff-scans",
+                scan_dt=scan_dt,
+                title=f"Scan Diff Report: {t.name}",
+                sections=pdf_sections,
+            )
+            console.print(f"PDF saved to {pdf_path}")
+            if logger:
+                logger.info("Diff scan PDF generated: tenant=%s path=%s", t.name, pdf_path)
 
 
 @cli.command()
@@ -646,13 +807,15 @@ def list_networks_cmd(ctx: click.Context, tenant: Optional[str]) -> None:  # typ
 @click.option("--service-info", is_flag=True, help="Enable nmap service/version detection (-sV)")
 @click.option("--iL", "input_list", type=click.Path(path_type=Path, exists=True, dir_okay=False), required=False, help="File with targets for masscan (-iL). If set, targets are taken from file, not from DB")
 @click.option("--all-tenants", is_flag=True, help="Scan all tenants sequentially with their individual settings")
+@click.option("--rate", "rate_override", type=click.IntRange(min=1), required=False, help="Override masscan rate for this run")
 @click.pass_context
-def scan_cmd(ctx: click.Context, tenant: Optional[str], mode: str, service_info: bool, input_list: Optional[Path], all_tenants: bool) -> None:  # type: ignore[override]
+def scan_cmd(ctx: click.Context, tenant: Optional[str], mode: str, service_info: bool, input_list: Optional[Path], all_tenants: bool, rate_override: Optional[int]) -> None:  # type: ignore[override]
     """Run scan(s).
 
     - Single tenant: specify --tenant NAME
     - All tenants: use --all-tenants (tenant is ignored)
     - If --iL is provided, masscan will read targets from the specified file (not from tenant networks) — only valid for single-tenant scans.
+    - --rate overrides the masscan rate (defaults to settings.rate when omitted).
     """
     from network_scanner.scan.runner import run_scan_for_tenant
 
@@ -665,7 +828,6 @@ def scan_cmd(ctx: click.Context, tenant: Optional[str], mode: str, service_info:
         if input_list is not None:
             console.print("--iL cannot be used together with --all-tenants", style="red")
             sys.exit(1)
-        # iterate all tenants
         with get_session(engine) as s:
             tenants = list_tenants(s)
             if not tenants:
@@ -673,17 +835,42 @@ def scan_cmd(ctx: click.Context, tenant: Optional[str], mode: str, service_info:
                 return
             for t in tenants:
                 if logger:
-                    logger.info("Scan requested (all-tenants): tenant=%s mode=%s service_info=%s", t.name, mode, service_info)
-                # Run per tenant
-                run_scan_for_tenant(settings, tenant_name=t.name, mode=mode, service_info=service_info, input_list=None)
+                    logger.info(
+                        "Scan requested (all-tenants): tenant=%s mode=%s service_info=%s rate=%s",
+                        t.name,
+                        mode,
+                        service_info,
+                        str(rate_override) if rate_override is not None else "(default)",
+                    )
+                run_scan_for_tenant(
+                    settings,
+                    tenant_name=t.name,
+                    mode=mode,
+                    service_info=service_info,
+                    input_list=None,
+                    rate_override=rate_override,
+                )
         return
 
-    # Single-tenant path
     if not tenant:
         console.print("--tenant is required unless --all-tenants is specified", style="red")
         sys.exit(1)
     if logger:
-        logger.info("Scan requested: tenant=%s mode=%s service_info=%s iL=%s", tenant, mode, service_info, str(input_list) if input_list else "")
-    run_scan_for_tenant(settings, tenant_name=tenant, mode=mode, service_info=service_info, input_list=input_list)
+        logger.info(
+            "Scan requested: tenant=%s mode=%s service_info=%s iL=%s rate=%s",
+            tenant,
+            mode,
+            service_info,
+            str(input_list) if input_list else "",
+            str(rate_override) if rate_override is not None else "(default)",
+        )
+    run_scan_for_tenant(
+        settings,
+        tenant_name=tenant,
+        mode=mode,
+        service_info=service_info,
+        input_list=input_list,
+        rate_override=rate_override,
+    )
 
 
