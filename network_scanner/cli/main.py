@@ -55,7 +55,58 @@ def _table_to_ascii(table: Table, width: int = PDF_TABLE_WIDTH) -> str:
     capture_console.print(table)
     text = capture_console.export_text(clear=False)
     capture_console.clear()
+    # Replace Unicode box-drawing characters with ASCII equivalents
+    text = _replace_unicode_to_ascii(text)
     return text.rstrip()
+
+
+def _replace_unicode_to_ascii(text: str) -> str:
+    """Replace Unicode box-drawing characters with ASCII equivalents for PDF export."""
+    replacements = {
+        "┏": "+",
+        "┓": "+",
+        "┗": "+",
+        "┛": "+",
+        "┃": "|",
+        "━": "-",
+        "┡": "+",
+        "┢": "+",
+        "┣": "+",
+        "┫": "+",
+        "┪": "+",
+        "┴": "+",
+        "┼": "+",
+        "╇": "+",
+        "╈": "+",
+        "╉": "+",
+        "╊": "+",
+        "╋": "+",
+        "┳": "+",
+        "┻": "+",
+        "╋": "+",
+        "│": "|",
+        "─": "-",
+        "├": "+",
+        "┤": "+",
+        "┬": "+",
+        "┴": "+",
+        "┼": "+",
+        "║": "|",
+        "═": "=",
+        "╔": "+",
+        "╗": "+",
+        "╚": "+",
+        "╝": "+",
+        "╠": "+",
+        "╣": "+",
+        "╦": "+",
+        "╩": "+",
+        "╬": "+",
+    }
+    result = text
+    for unicode_char, ascii_char in replacements.items():
+        result = result.replace(unicode_char, ascii_char)
+    return result
 
 
 def _sanitize_filename_component(value: str) -> str:
@@ -105,6 +156,14 @@ def _export_pdf_report(
         pdf.set_font("Courier", size=9)
         for raw_line in block.splitlines():
             line = raw_line.rstrip()
+            # Replace any remaining Unicode characters with ASCII
+            line = _replace_unicode_to_ascii(line)
+            # Ensure line is ASCII-compatible
+            try:
+                line.encode('latin-1')
+            except UnicodeEncodeError:
+                # If encoding fails, replace problematic characters
+                line = line.encode('ascii', 'replace').decode('ascii')
             pdf.set_x(pdf.l_margin)
             pdf.cell(0, line_height, line if line else " ", ln=True)
         pdf.ln(2)
