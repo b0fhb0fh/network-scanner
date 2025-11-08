@@ -8,7 +8,7 @@ from sqlalchemy import create_engine, select, event
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
-from .models import Base, Tenant, Network, Scan, Host, Service, TenantPorts, TenantExclude
+from .models import Base, Tenant, Network, Scan, Host, Service, TenantPorts, TenantExclude, Vulnerability
 
 
 def create_sqlite_engine(db_path: Path) -> Engine:
@@ -68,6 +68,18 @@ def init_db(engine: Engine) -> None:
 
     # Ensure tenant_exclude table exists (create_all above should create it for new DBs)
     # No destructive migrations here to keep it simple
+    
+    # Ensure vulnerability table exists (create_all above should create it for new DBs)
+    # Migration: create vulnerability table if it doesn't exist
+    try:
+        with engine.begin() as conn:
+            info = list(conn.exec_driver_sql("PRAGMA table_info('vulnerability')").fetchall())
+            if not info:
+                # Table doesn't exist, create it
+                Base.metadata.create_all(engine, tables=[Vulnerability.__table__])
+    except Exception:
+        # If migration fails, try to create all tables (for new DBs)
+        Base.metadata.create_all(engine)
 
 
 @contextmanager

@@ -7,3 +7,4 @@ rich
 pyyaml
 python-masscan
 fpdf2
+requests

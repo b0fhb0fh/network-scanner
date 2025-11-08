@@ -27,6 +27,7 @@ def run_scan_for_tenant(
     service_info: bool = False,
     input_list: Optional[Path] = None,
     rate_override: Optional[int] = None,
+    vulners: bool = False,
 ) -> None:
     import masscan  # python-masscan
 
@@ -205,6 +206,20 @@ def run_scan_for_tenant(
                     nmap_args.insert(sS_index + 1, "-sV")
                 except ValueError:
                     nmap_args.insert(1, "-sV")
+            
+            # Optionally enable vulners script
+            if vulners:
+                if "--script" not in nmap_args:
+                    nmap_args.append("--script")
+                    nmap_args.append("vulners")
+                else:
+                    # Append vulners to existing script list
+                    script_idx = nmap_args.index("--script")
+                    if script_idx + 1 < len(nmap_args):
+                        existing_script = nmap_args[script_idx + 1]
+                        nmap_args[script_idx + 1] = f"{existing_script},vulners"
+                    else:
+                        nmap_args.append("vulners")
 
             # Apply per-tenant excludes to nmap via --exclude
             if excludes:
@@ -221,7 +236,7 @@ def run_scan_for_tenant(
 
     # Outside of the session: parse results and write Hosts/Services in a separate session
     try:
-        parse_nmap_xml_into_db(engine, date_dir / "nmap.xml", scan_id=current_scan_id)
+        parse_nmap_xml_into_db(engine, date_dir / "nmap.xml", scan_id=current_scan_id, settings=settings if vulners else None)
         parse_ok = True
     except Exception as e:
         logger.info("Parsing nmap XML failed: %s", str(e))
