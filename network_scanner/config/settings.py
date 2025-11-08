@@ -14,6 +14,9 @@ class Settings:
     nmap_path: str = "nmap"
     tcp_ports_default: Optional[str] = None
     exclude_ports: Optional[str] = None
+    epss_api_url: str = "https://api.first.org/data/v1/epss"
+    epss_significant_threshold: float = 0.1
+    nvd_api_url: str = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 
     @staticmethod
     def load(config_path: Optional[str] = None) -> "Settings":
@@ -62,6 +65,15 @@ class Settings:
                 settings.tcp_ports_default = (file_cfg["tcp_ports_default"].strip() or None)  # type: ignore[assignment]
             if "exclude_ports" in file_cfg:
                 settings.exclude_ports = (file_cfg["exclude_ports"].strip() or None)  # type: ignore[assignment]
+            if "epss_api_url" in file_cfg:
+                settings.epss_api_url = str(file_cfg["epss_api_url"])  # type: ignore[assignment]
+            if "epss_significant_threshold" in file_cfg:
+                try:
+                    settings.epss_significant_threshold = float(file_cfg["epss_significant_threshold"])  # type: ignore[assignment]
+                except ValueError:
+                    pass
+            if "nvd_api_url" in file_cfg:
+                settings.nvd_api_url = str(file_cfg["nvd_api_url"])  # type: ignore[assignment]
 
         # 3) Override from environment variables if present
         env_overrides = {
@@ -76,6 +88,15 @@ class Settings:
             "exclude_ports": os.environ.get("NETWORK_SCANNER_EXCLUDE_PORTS")
                 or os.environ.get("EXCLUDE_PORTS")
                 or os.environ.get("exclude_ports"),
+            "epss_api_url": os.environ.get("NETWORK_SCANNER_EPSS_API_URL")
+                or os.environ.get("EPSS_API_URL")
+                or os.environ.get("epss_api_url"),
+            "epss_significant_threshold": os.environ.get("NETWORK_SCANNER_EPSS_SIGNIFICANT_THRESHOLD")
+                or os.environ.get("EPSS_SIGNIFICANT_THRESHOLD")
+                or os.environ.get("epss_significant_threshold"),
+            "nvd_api_url": os.environ.get("NETWORK_SCANNER_NVD_API_URL")
+                or os.environ.get("NVD_API_URL")
+                or os.environ.get("nvd_api_url"),
         }
         if env_overrides["sqlite_path"]:
             settings.sqlite_path = Path(str(env_overrides["sqlite_path"]))  # type: ignore[assignment]
@@ -92,6 +113,15 @@ class Settings:
             settings.tcp_ports_default = (str(env_overrides["tcp_ports_default"]).strip() or None)  # type: ignore[assignment]
         if env_overrides["exclude_ports"]:
             settings.exclude_ports = (str(env_overrides["exclude_ports"]).strip() or None)  # type: ignore[assignment]
+        if env_overrides["epss_api_url"]:
+            settings.epss_api_url = str(env_overrides["epss_api_url"])  # type: ignore[assignment]
+        if env_overrides["epss_significant_threshold"]:
+            try:
+                settings.epss_significant_threshold = float(str(env_overrides["epss_significant_threshold"]))  # type: ignore[assignment]
+            except ValueError:
+                pass
+        if env_overrides["nvd_api_url"]:
+            settings.nvd_api_url = str(env_overrides["nvd_api_url"])  # type: ignore[assignment]
 
         settings.data_dir.mkdir(parents=True, exist_ok=True)
         return settings

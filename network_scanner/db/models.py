@@ -9,6 +9,7 @@ from sqlalchemy import (
     ForeignKey,
     Integer,
     String,
+    Float,
     UniqueConstraint,
     create_engine,
 )
@@ -112,6 +113,24 @@ class Service(Base):
 
     __table_args__ = (
         UniqueConstraint("host_id", "port", "protocol", name="uq_service_host_port_proto"),
+    )
+
+
+class Vulnerability(Base):
+    __tablename__ = "vulnerability"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    host_id: Mapped[int] = mapped_column(ForeignKey("host.id", ondelete="CASCADE"), nullable=False, index=True)
+    cve_id: Mapped[str] = mapped_column(String(32), nullable=False)  # CVE-YYYY-NNNNN
+    epss: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # EPSS score 0.0-1.0
+    percentile: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # EPSS percentile
+    cvss_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # CVSS base score
+    cvss_vector: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)  # CVSS vector string
+    exploit_probability: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # Calculated exploit probability
+    time_discovery: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("host_id", "cve_id", name="uq_vulnerability_host_cve"),
     )
 
 

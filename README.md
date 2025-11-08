@@ -33,6 +33,8 @@ pip install -r requirements.txt
 - Путь к `nmap`: `nmap_path` | `NETWORK_SCANNER_NMAP` | `NMAP_PATH` (по умолчанию `nmap`)
 - TCP‑порты по умолчанию: `tcp_ports_default` | `NETWORK_SCANNER_TCP_PORTS_DEFAULT` | `TCP_PORTS_DEFAULT`
 - Исключаемые TCP‑порты из nmap: `exclude_ports` | `NETWORK_SCANNER_EXCLUDE_PORTS` | `EXCLUDE_PORTS`
+- EPSS API URL: `epss_api_url` | `NETWORK_SCANNER_EPSS_API_URL` | `EPSS_API_URL` (по умолчанию `https://api.first.org/data/v1/epss`)
+- EPSS значимый порог: `epss_significant_threshold` | `NETWORK_SCANNER_EPSS_SIGNIFICANT_THRESHOLD` | `EPSS_SIGNIFICANT_THRESHOLD` (по умолчанию `0.1`)
 
 Исключения адресов/подсетей на уровне арендатора настраиваются через CLI (см. ниже). Они применяются к обоим сканерам: Masscan (`--exclude`) и Nmap (`--exclude`).
 
@@ -44,6 +46,8 @@ rate=4096
 nmap_path=nmap
 tcp_ports_default=22,80,443
 exclude_ports=5900,12345
+epss_api_url=https://api.first.org/data/v1/epss
+epss_significant_threshold=0.1
 ```
 
 ### CLI
@@ -88,6 +92,9 @@ python cli.py scan --tenant ACME --mode all
 # Определение названий и версий сервисов (-сV)
 python cli.py scan --tenant ACME --mode tcp --service-info
 
+# Сканирование с обнаружением уязвимостей (--script vulners)
+python cli.py scan --tenant ACME --mode tcp --service-info --vulners
+
 # Сканирование по списку целей из файла (masscan -iL)
 # В этом режиме цели берутся из файла, а не из БД тенанта
 python cli.py scan --tenant ACME --mode tcp --iL ./targets.txt
@@ -128,6 +135,13 @@ python cli.py diff-scans --tenant ACME
 python cli.py diff-scans --tenant ACME --pdf  # PDF отчёт в data/<tenant>/reports
 ```
 
+- Поиск уязвимостей для последнего скана:
+```bash
+# Если уязвимости уже есть - обновит EPSS и пересчитает вероятность взлома
+# Если уязвимостей нет - запустит nmap --script vulners
+python cli.py search-vulners --tenant ACME
+```
+
 Пример с конфигом:
 ```bash
 python cli.py --config ./settings.yaml scan --tenant ACME
@@ -142,7 +156,9 @@ python cli.py --config ./settings.yaml scan --tenant ACME
 - `--iL <file>` — передаёт список целей в Masscan через `-iL <file>`. В этом режиме цели не берутся из сетей в БД.
 - `--all-tenants` — последовательно запускает сканирование для всех арендаторов с их индивидуальными настройками (сети, исключения и т. п.). Несовместимо с `--iL`.
 - `--rate <value>` — переопределяет скорость masscan для текущего запуска (по умолчанию берётся `rate` из настроек).
+- `--vulners` — включает nmap скрипт `vulners` для обнаружения CVE (требует `--service-info`). Результаты сохраняются в БД с EPSS оценками и расчетом вероятности взлома.
 - `--pdf` (в командах `show-last-scan`, `diff-scans`) — сохраняет PDF-отчёт в директорию `data/<tenant>/reports/`, имя файла содержит название тенанта, тип отчёта и время сканирования.
+- `search-vulners` — команда для поиска уязвимостей в последнем скане. Если уязвимости уже есть — обновляет EPSS и пересчитывает вероятность взлома. Если нет — запускает nmap --script vulners.
 
 ### Как это работает
 1. Быстрый проход выполняется через `python-masscan` (TCP), где задаются цели (CIDR/адреса), порты и ограничение скорости (`--rate`). При наличии исключений арендатора — используются `--exclude`.

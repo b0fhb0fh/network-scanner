@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sys
-import textwrap
+import io
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -39,11 +39,23 @@ from network_scanner.db.dao import (
     update_tenant_exclude,
     delete_tenant_exclude,
 )
-from network_scanner.db.models import Scan, Host, Service
+from network_scanner.db.models import Scan, Host, Service, Vulnerability
 from sqlalchemy import select, desc
 
 
 console = Console()
+
+PDF_TABLE_WIDTH = 110
+
+
+def _table_to_ascii(table: Table, width: int = PDF_TABLE_WIDTH) -> str:
+    # Use StringIO to prevent output to stdout
+    output = io.StringIO()
+    capture_console = Console(file=output, width=width, record=True, force_terminal=False)
+    capture_console.print(table)
+    text = capture_console.export_text(clear=False)
+    capture_console.clear()
+    return text.rstrip()
 
 
 def _sanitize_filename_component(value: str) -> str:
@@ -70,7 +82,7 @@ def _export_pdf_report(
     report_type: str,
     scan_dt: datetime | None,
     title: str,
-    sections: list[tuple[str, list[str]]],
+    blocks: list[str],
 ) -> Path:
     FPDF_cls = _load_fpdf()
     pdf_path = _build_pdf_path(settings, tenant_name, report_type, scan_dt)
@@ -85,22 +97,16 @@ def _export_pdf_report(
         pdf.cell(0, 8, f"Scan started: {scan_dt.replace(microsecond=0).isoformat(sep=' ')}", ln=True)
     pdf.ln(4)
 
-    usable_width = getattr(pdf, "epw", pdf.w - pdf.l_margin - pdf.r_margin)
+    line_height = 4.5
 
-    for heading, lines in sections:
-        pdf.set_font("Helvetica", "B", 13)
-        pdf.set_x(pdf.l_margin)
-        pdf.cell(0, 8, heading, ln=True)
-        pdf.set_font("Helvetica", size=11)
-        if not lines:
+    for block in blocks:
+        if not block:
+            continue
+        pdf.set_font("Courier", size=9)
+        for raw_line in block.splitlines():
+            line = raw_line.rstrip()
             pdf.set_x(pdf.l_margin)
-            pdf.cell(0, 6, "(no data)", ln=True)
-        else:
-            for line in lines:
-                wrapped = textwrap.wrap(line, width=100) or [""]
-                for item in wrapped:
-                    pdf.set_x(pdf.l_margin)
-                    pdf.multi_cell(usable_width, 6, item or " ")
+            pdf.cell(0, line_height, line if line else " ", ln=True)
         pdf.ln(2)
 
     pdf.output(str(pdf_path))
@@ -487,6 +493,7 @@ def show_last_scan_cmd(ctx: click.Context, tenant: str, pdf: bool) -> None:  # t
     settings: Settings = ctx.obj["settings"]
     logger = ctx.obj.get("logger")
     engine = create_sqlite_engine(settings.sqlite_path)
+    init_db(engine)
     with get_session(engine) as s:
         t = get_tenant_by_name(s, tenant)
         if not t:
@@ -524,22 +531,9 @@ def show_last_scan_cmd(ctx: click.Context, tenant: str, pdf: bool) -> None:  # t
         scan_table.add_row("Status", last_scan.status)
         scan_table.add_row("Started", _fmt_dt(last_scan.started_at))
         scan_table.add_row("Finished", _fmt_dt(last_scan.finished_at) if last_scan.finished_at else "N/A")
+        scan_table_text = _table_to_ascii(scan_table)
         console.print(scan_table)
-        console.print()
-
-        pdf_sections: list[tuple[str, list[str]]] = []
-        pdf_sections.append(
-            (
-                "Scan Info",
-                [
-                    f"Scan ID: {last_scan.id}",
-                    f"Mode: {last_scan.mode}",
-                    f"Status: {last_scan.status}",
-                    f"Started: {_fmt_dt(last_scan.started_at)}",
-                    f"Finished: {_fmt_dt(last_scan.finished_at) if last_scan.finished_at else 'N/A'}",
-                ],
-            )
-        )
+        pdf_blocks: list[str] = [scan_table_text]
 
         # Display hosts and services
         for host in hosts:
@@ -557,7 +551,6 @@ def show_last_scan_cmd(ctx: click.Context, tenant: str, pdf: bool) -> None:  # t
                 .order_by(Service.port, Service.protocol)
             ).all()
 
-            pdf_host_lines: list[str] = []
             if services:
                 for svc in services:
                     host_table.add_row(
@@ -568,16 +561,113 @@ def show_last_scan_cmd(ctx: click.Context, tenant: str, pdf: bool) -> None:  # t
                         svc.version or "",
                         (_fmt_dt(svc.time_discovery) if svc.time_discovery else "N/A")
                     )
-                    pdf_host_lines.append(
-                        f"{svc.protocol}/{svc.port}: {svc.name or ''} {svc.product or ''} {svc.version or ''}".strip()
-                    )
             else:
                 host_table.add_row("No services", "", "", "", "", "")
-                pdf_host_lines.append("No services")
 
+            host_table_text = _table_to_ascii(host_table)
             console.print(host_table)
-            console.print()
-            pdf_sections.append((f"Host {host.ip} ({host.hostname or 'No hostname'})", pdf_host_lines))
+            pdf_blocks.append(host_table_text)
+            
+            # Display vulnerabilities for this host
+            vulnerabilities = s.scalars(
+                select(Vulnerability)
+                .where(Vulnerability.host_id == host.id)
+                .order_by(Vulnerability.cve_id)
+            ).all()
+            
+            if vulnerabilities:
+                from network_scanner.vuln import get_cvss_data
+                
+                # Get services for this host to show product/version info
+                host_services = s.scalars(
+                    select(Service)
+                    .where(Service.host_id == host.id)
+                    .order_by(Service.port, Service.protocol)
+                ).all()
+                
+                # Create a list of services with product/version info
+                services_with_info: list[dict[str, str]] = []
+                for svc in host_services:
+                    if svc.product or svc.version:
+                        services_with_info.append({
+                            "port": str(svc.port),
+                            "product": svc.product or "",
+                            "version": svc.version or "",
+                        })
+                
+                vuln_table = Table(title=f"Vulnerabilities for {host.ip}")
+                vuln_table.add_column("CVE")
+                vuln_table.add_column("Port")
+                vuln_table.add_column("Product")
+                vuln_table.add_column("Version")
+                vuln_table.add_column("CVSS")
+                vuln_table.add_column("EPSS")
+                vuln_table.add_column("Percentile")
+                
+                for vuln in vulnerabilities:
+                    # Get CVSS if not already stored
+                    if vuln.cvss_score is None or vuln.cvss_score == 0.0:
+                        cvss_data = get_cvss_data(settings, vuln.cve_id)
+                        vuln.cvss_score = cvss_data.get("baseScore", 0.0)
+                        vuln.cvss_vector = cvss_data.get("vector", "N/A")
+                        s.flush()
+                    
+                    # Show service info for this vulnerability
+                    # If multiple services exist, show them comma-separated
+                    if services_with_info:
+                        # Combine all services with product/version info
+                        ports = [s["port"] for s in services_with_info]
+                        products = [s["product"] for s in services_with_info if s["product"]]
+                        versions = [s["version"] for s in services_with_info if s["version"]]
+                        
+                        # Remove duplicates while preserving order
+                        unique_ports = []
+                        seen_ports = set()
+                        for p in ports:
+                            if p not in seen_ports:
+                                unique_ports.append(p)
+                                seen_ports.add(p)
+                        
+                        unique_products = []
+                        seen_products = set()
+                        for p in products:
+                            if p not in seen_products:
+                                unique_products.append(p)
+                                seen_products.add(p)
+                        
+                        unique_versions = []
+                        seen_versions = set()
+                        for v in versions:
+                            if v not in seen_versions:
+                                unique_versions.append(v)
+                                seen_versions.add(v)
+                        
+                        port_str = ", ".join(unique_ports) if unique_ports else ""
+                        product_str = ", ".join(unique_products) if unique_products else ""
+                        version_str = ", ".join(unique_versions) if unique_versions else ""
+                    else:
+                        port_str = ""
+                        product_str = ""
+                        version_str = ""
+                    
+                    cvss_str = f"{vuln.cvss_score:.1f}" if vuln.cvss_score and vuln.cvss_score > 0 else "N/A"
+                    epss_str = f"{vuln.epss:.4f}" if vuln.epss is not None else "N/A"
+                    percentile_str = f"{vuln.percentile:.2f}" if vuln.percentile is not None else "N/A"
+                    vuln_table.add_row(vuln.cve_id, port_str, product_str, version_str, cvss_str, epss_str, percentile_str)
+                
+                vuln_table_text = _table_to_ascii(vuln_table)
+                console.print(vuln_table)
+                pdf_blocks.append(vuln_table_text)
+                
+                # Display overall exploit probability for host (only once per host)
+                if vulnerabilities[0].exploit_probability is not None:
+                    risk_table = Table(title=f"Overall Risk for {host.ip}")
+                    risk_table.add_column("Metric")
+                    risk_table.add_column("Value")
+                    risk_table.add_row("Exploit Probability", f"{vulnerabilities[0].exploit_probability:.2%}")
+                    risk_table_text = _table_to_ascii(risk_table)
+                    console.print(risk_table)
+                    pdf_blocks.append(risk_table_text)
 
         if pdf:
             scan_dt = last_scan.started_at if isinstance(last_scan.started_at, datetime) else None
@@ -587,11 +677,197 @@ def show_last_scan_cmd(ctx: click.Context, tenant: str, pdf: bool) -> None:  # t
                 report_type="last-scan",
                 scan_dt=scan_dt,
                 title=f"Last Scan Report: {t.name}",
-                sections=pdf_sections,
+                blocks=pdf_blocks,
             )
             console.print(f"PDF saved to {pdf_path}")
             if logger:
                 logger.info("Last scan PDF generated: tenant=%s path=%s", t.name, pdf_path)
+
+
+@cli.command()
+@click.option("--tenant", required=True, help="Tenant name")
+@click.pass_context
+def search_vulners_cmd(ctx: click.Context, tenant: str) -> None:  # type: ignore[override]
+    """Search for vulnerabilities in the last scan for a tenant.
+    
+    If the last scan didn't include vulnerability data, runs nmap --script vulners.
+    If vulnerabilities already exist, refreshes EPSS scores and recalculates exploit probability.
+    """
+    from network_scanner.vuln import extract_cves_from_nmap_xml, get_epss_score, calculate_exploit_probability
+    import subprocess
+    import tempfile
+    
+    settings: Settings = ctx.obj["settings"]
+    logger = ctx.obj.get("logger")
+    engine = create_sqlite_engine(settings.sqlite_path)
+    init_db(engine)
+    
+    with get_session(engine) as s:
+        t = get_tenant_by_name(s, tenant)
+        if not t:
+            console.print(f"Tenant '{tenant}' not found", style="red")
+            sys.exit(1)
+        
+        # Get the most recent scan
+        last_scan = s.scalar(
+            select(Scan)
+            .where(Scan.tenant_id == t.id)
+            .order_by(desc(Scan.started_at))
+            .limit(1)
+        )
+        
+        if not last_scan:
+            console.print(f"No scans found for tenant '{tenant}'", style="yellow")
+            return
+        
+        # Get hosts for this scan
+        hosts = s.scalars(select(Host).where(Host.scan_id == last_scan.id).order_by(Host.ip)).all()
+        if not hosts:
+            console.print(f"No hosts found in last scan for tenant '{tenant}'", style="yellow")
+            return
+        
+        # Check if vulnerabilities already exist
+        host_ids = [h.id for h in hosts]
+        existing_vulns = s.scalars(
+            select(Vulnerability).where(Vulnerability.host_id.in_(host_ids))
+        ).all()
+        
+        if existing_vulns:
+            # Refresh EPSS scores and recalculate exploit probability
+            console.print(f"Found {len(existing_vulns)} existing vulnerabilities. Refreshing EPSS scores...")
+            if logger:
+                logger.info("Refreshing EPSS for tenant=%s scan_id=%s", tenant, last_scan.id)
+            
+            for host in hosts:
+                host_vulns = [v for v in existing_vulns if v.host_id == host.id]
+                if not host_vulns:
+                    continue
+                
+                epss_scores: list[float] = []
+                for vuln in host_vulns:
+                    epss_data = get_epss_score(settings, vuln.cve_id)
+                    vuln.epss = epss_data["epss"]
+                    vuln.percentile = epss_data["percentile"]
+                    if epss_data["epss"] > 0:
+                        epss_scores.append(epss_data["epss"])
+                
+                if epss_scores:
+                    exploit_prob = calculate_exploit_probability(
+                        epss_scores, settings.epss_significant_threshold
+                    )
+                    for vuln in host_vulns:
+                        vuln.exploit_probability = exploit_prob
+                
+                s.flush()
+            
+            console.print("EPSS scores refreshed and exploit probabilities recalculated.")
+            if logger:
+                logger.info("EPSS refresh completed for tenant=%s", tenant)
+        else:
+            # Need to run vulners scan
+            console.print("No vulnerabilities found in last scan. Running nmap --script vulners...")
+            if logger:
+                logger.info("Running vulners scan for tenant=%s scan_id=%s", tenant, last_scan.id)
+            
+            date_dir = settings.data_dir / t.name / last_scan.started_at.strftime("%Y%m%d")
+            date_dir.mkdir(parents=True, exist_ok=True)
+            
+            with tempfile.TemporaryDirectory() as tmpdir:
+                hosts_file = Path(tmpdir) / "hosts.txt"
+                hosts_file.write_text("\n".join(sorted([h.ip for h in hosts])), encoding="utf-8")
+                
+                # Get ports for each host from services
+                host_ports: dict[str, set[int]] = {}
+                for host in hosts:
+                    services = s.scalars(
+                        select(Service).where(Service.host_id == host.id)
+                    ).all()
+                    ports = {svc.port for svc in services if svc.protocol == "tcp"}
+                    if ports:
+                        host_ports[host.ip] = ports
+                
+                # Run nmap with vulners script for each host
+                for host in hosts:
+                    if host.ip not in host_ports:
+                        continue
+                    
+                    ports = sorted(host_ports[host.ip])
+                    nmap_args = [
+                        settings.nmap_path,
+                        "-sS",
+                        "-sV",
+                        "--script", "vulners",
+                        "-p", ",".join(str(p) for p in ports),
+                        "-n",
+                        "-PN",
+                        "-oX", str(date_dir / f"vulners_{host.ip.replace('.', '_')}.xml"),
+                        host.ip,
+                    ]
+                    
+                    if logger:
+                        logger.info("Running nmap vulners for host=%s", host.ip)
+                    
+                    try:
+                        proc = subprocess.run(nmap_args, capture_output=True, text=True, timeout=600)
+                        if proc.returncode != 0:
+                            console.print(f"Warning: nmap failed for {host.ip}: {proc.stderr}", style="yellow")
+                            continue
+                        
+                        # Parse vulnerabilities from XML
+                        xml_path = date_dir / f"vulners_{host.ip.replace('.', '_')}.xml"
+                        if xml_path.exists():
+                            host_cves = extract_cves_from_nmap_xml(str(xml_path))
+                            if host.ip in host_cves:
+                                cve_list = host_cves[host.ip]
+                                time_discovery = last_scan.started_at if isinstance(last_scan.started_at, datetime) else datetime.now(timezone.utc)
+                                
+                                epss_scores: list[float] = []
+                                for cve_id in cve_list:
+                                    # Check if already exists
+                                    existing = s.scalar(
+                                        select(Vulnerability).where(
+                                            Vulnerability.host_id == host.id,
+                                            Vulnerability.cve_id == cve_id
+                                        )
+                                    )
+                                    if existing:
+                                        continue
+                                    
+                                    epss_data = get_epss_score(settings, cve_id)
+                                    vuln = Vulnerability(
+                                        host_id=host.id,
+                                        cve_id=cve_id,
+                                        epss=epss_data["epss"],
+                                        percentile=epss_data["percentile"],
+                                        time_discovery=time_discovery,
+                                    )
+                                    s.add(vuln)
+                                    if epss_data["epss"] > 0:
+                                        epss_scores.append(epss_data["epss"])
+                                
+                                # Calculate exploit probability
+                                if epss_scores:
+                                    exploit_prob = calculate_exploit_probability(
+                                        epss_scores, settings.epss_significant_threshold
+                                    )
+                                    host_vulns = s.scalars(
+                                        select(Vulnerability).where(Vulnerability.host_id == host.id)
+                                    ).all()
+                                    for vuln in host_vulns:
+                                        vuln.exploit_probability = exploit_prob
+                                
+                                s.flush()
+                                console.print(f"Found {len(cve_list)} CVE(s) for {host.ip}")
+                    except subprocess.TimeoutExpired:
+                        console.print(f"Warning: nmap timeout for {host.ip}", style="yellow")
+                    except Exception as e:
+                        console.print(f"Error scanning {host.ip}: {str(e)}", style="red")
+                        if logger:
+                            logger.info("Vulners scan error for host=%s: %s", host.ip, str(e))
+            
+            console.print("Vulnerability scan completed.")
+            if logger:
+                logger.info("Vulners scan completed for tenant=%s", tenant)
 
 
 @cli.command()
@@ -667,21 +943,11 @@ def diff_scans_cmd(ctx: click.Context, tenant: str, pdf: bool) -> None:  # type:
         info_table.add_row("Newer Started", _fmt_dt(newer.started_at))
         info_table.add_row("Older Scan ID", str(older.id))
         info_table.add_row("Older Started", _fmt_dt(older.started_at))
+        info_table_text = _table_to_ascii(info_table)
         console.print(info_table)
         console.print()
 
-        pdf_sections: list[tuple[str, list[str]]] = []
-        pdf_sections.append(
-            (
-                "Scans Compared",
-                [
-                    f"Newer Scan ID: {newer.id}",
-                    f"Newer Started: {_fmt_dt(newer.started_at)}",
-                    f"Older Scan ID: {older.id}",
-                    f"Older Started: {_fmt_dt(older.started_at)}",
-                ],
-            )
-        )
+        pdf_blocks: list[str] = [info_table_text]
 
         # Hosts added/removed
         if hosts_added or hosts_removed:
@@ -692,18 +958,18 @@ def diff_scans_cmd(ctx: click.Context, tenant: str, pdf: bool) -> None:  # type:
                 hr_table.add_row("Added", ", ".join(hosts_added))
             if hosts_removed:
                 hr_table.add_row("Removed", ", ".join(hosts_removed))
+            hr_table_text = _table_to_ascii(hr_table)
             console.print(hr_table)
             console.print()
-            changes_lines: list[str] = []
-            if hosts_added:
-                changes_lines.append(f"Added: {', '.join(hosts_added)}")
-            if hosts_removed:
-                changes_lines.append(f"Removed: {', '.join(hosts_removed)}")
-            pdf_sections.append(("Host Changes", changes_lines))
+            pdf_blocks.append(hr_table_text)
         else:
             console.print("No host changes", style="green")
             console.print()
-            pdf_sections.append(("Host Changes", ["No host changes"]))
+            hr_table = Table(title="Hosts changes")
+            hr_table.add_column("Type")
+            hr_table.add_column("Hosts")
+            hr_table.add_row("Info", "No host changes")
+            pdf_blocks.append(_table_to_ascii(hr_table))
 
         # Port diffs for common hosts
         any_port_changes = False
@@ -728,26 +994,18 @@ def diff_scans_cmd(ctx: click.Context, tenant: str, pdf: bool) -> None:  # type:
                     "Closed",
                     ", ".join(f"{proto}:{port}" for proto, port in removed_ports),
                 )
+            ht_text = _table_to_ascii(ht)
             console.print(ht)
             console.print()
-
-            port_lines: list[str] = []
-            if added_ports:
-                port_lines.append(
-                    "Opened: "
-                    + ", ".join(f"{proto}:{port}" for proto, port in added_ports)
-                )
-            if removed_ports:
-                port_lines.append(
-                    "Closed: "
-                    + ", ".join(f"{proto}:{port}" for proto, port in removed_ports)
-                )
-            pdf_sections.append((f"Port Changes for {ip}", port_lines))
+            pdf_blocks.append(ht_text)
 
         if not any_port_changes:
             console.print("No port changes on common hosts", style="green")
             console.print()
-            pdf_sections.append(("Port Changes", ["No port changes on common hosts"]))
+            port_table = Table(title="Port Changes")
+            port_table.add_column("Info")
+            port_table.add_row("No port changes on common hosts")
+            pdf_blocks.append(_table_to_ascii(port_table))
 
         if pdf:
             scan_dt = newer.started_at if isinstance(newer.started_at, datetime) else None
@@ -757,7 +1015,7 @@ def diff_scans_cmd(ctx: click.Context, tenant: str, pdf: bool) -> None:  # type:
                 report_type="diff-scans",
                 scan_dt=scan_dt,
                 title=f"Scan Diff Report: {t.name}",
-                sections=pdf_sections,
+                blocks=pdf_blocks,
             )
             console.print(f"PDF saved to {pdf_path}")
             if logger:
@@ -805,18 +1063,23 @@ def list_networks_cmd(ctx: click.Context, tenant: Optional[str]) -> None:  # typ
 @click.option("--tenant", required=False, default=None, help="Tenant name to scan (omit with --all-tenants)")
 @click.option("--mode", type=click.Choice(["tcp", "all"]), default="tcp")
 @click.option("--service-info", is_flag=True, help="Enable nmap service/version detection (-sV)")
+@click.option("--vulners", is_flag=True, help="Enable nmap vulners script (requires --service-info)")
 @click.option("--iL", "input_list", type=click.Path(path_type=Path, exists=True, dir_okay=False), required=False, help="File with targets for masscan (-iL). If set, targets are taken from file, not from DB")
 @click.option("--all-tenants", is_flag=True, help="Scan all tenants sequentially with their individual settings")
 @click.option("--rate", "rate_override", type=click.IntRange(min=1), required=False, help="Override masscan rate for this run")
 @click.pass_context
-def scan_cmd(ctx: click.Context, tenant: Optional[str], mode: str, service_info: bool, input_list: Optional[Path], all_tenants: bool, rate_override: Optional[int]) -> None:  # type: ignore[override]
+def scan_cmd(ctx: click.Context, tenant: Optional[str], mode: str, service_info: bool, vulners: bool, input_list: Optional[Path], all_tenants: bool, rate_override: Optional[int]) -> None:  # type: ignore[override]
     """Run scan(s).
 
     - Single tenant: specify --tenant NAME
     - All tenants: use --all-tenants (tenant is ignored)
     - If --iL is provided, masscan will read targets from the specified file (not from tenant networks) — only valid for single-tenant scans.
     - --rate overrides the masscan rate (defaults to settings.rate when omitted).
+    - --vulners enables nmap vulners script for CVE detection (requires --service-info).
     """
+    if vulners and not service_info:
+        console.print("--vulners requires --service-info", style="red")
+        sys.exit(1)
     from network_scanner.scan.runner import run_scan_for_tenant
 
     settings: Settings = ctx.obj["settings"]
@@ -849,6 +1112,7 @@ def scan_cmd(ctx: click.Context, tenant: Optional[str], mode: str, service_info:
                     service_info=service_info,
                     input_list=None,
                     rate_override=rate_override,
+                    vulners=vulners,
                 )
         return
 
@@ -871,6 +1135,7 @@ def scan_cmd(ctx: click.Context, tenant: Optional[str], mode: str, service_info:
         service_info=service_info,
         input_list=input_list,
         rate_override=rate_override,
+        vulners=vulners,
     )
 
 
