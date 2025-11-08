@@ -106,8 +106,7 @@ def get_cvss_data(settings: Settings, cve_id: str) -> dict[str, str | float]:
         dict: {'version': str, 'baseScore': float, 'vector': str}
     """
     try:
-        nvd_api_url = getattr(settings, "nvd_api_url", "https://services.nvd.nist.gov/rest/json/cves/2.0")
-        url = f"{nvd_api_url}?cveId={cve_id}"
+        url = f"{settings.nvd_api_url}?cveId={cve_id}"
         response = requests.get(url, timeout=10)
         if response.status_code == 200:
             data = response.json()
