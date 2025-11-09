@@ -185,7 +185,7 @@ def run_scan_for_tenant(
             hosts_file = Path(tmpdir) / "hosts.txt"
             hosts_file.write_text("\n".join(sorted(hosts)), encoding="utf-8")
 
-            nmap_args: list[str] = [settings.nmap_path, "--open", "-n", "-PN", "-oX", str(date_dir / "nmap.xml")]
+            nmap_args: list[str] = [settings.nmap_path, "--open", "-PN", "-oX", str(date_dir / "nmap.xml")]
             if tcp_ports:
                 nmap_args = [settings.nmap_path, "-sS", *nmap_args[2:]]
                 nmap_args += ["-p", f"T:{','.join(str(p) for p in sorted(tcp_ports))}"]
