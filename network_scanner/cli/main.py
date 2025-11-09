@@ -46,6 +46,115 @@ from sqlalchemy import select, desc
 console = Console()
 
 PDF_TABLE_WIDTH = 110
+CONSOLE_TABLE_WIDTH = 120  # Fixed width for all console tables
+
+
+def _table_to_data(table: Table) -> dict:
+    """Extract table data for PDF generation."""
+    data = {
+        "title": table.title or "",
+        "columns": [],
+        "rows": [],
+    }
+    # Extract column headers
+    for col in table.columns:
+        header = col.header
+        if hasattr(header, 'plain'):
+            header = header.plain
+        data["columns"].append(str(header) if header else "")
+    
+    # Extract rows - Rich Table doesn't expose cells directly
+    # So we render the table and parse the output
+    rows_data = []
+    
+    # Render table to text and parse it
+    from rich.console import Console as RichConsole
+    from io import StringIO
+    output = StringIO()
+    console = RichConsole(file=output, width=120, record=True, force_terminal=False)
+    console.print(table)
+    rendered = console.export_text(clear=False)
+    
+    # Parse rendered text to extract rows
+    lines = rendered.splitlines()
+    # Find data rows (lines with │ or ┃ separators)
+    # Skip header row - it's the first data row after borders
+    header_found = False
+    for line in lines:
+        original_line = line
+        line = line.strip()
+        # Skip empty lines and border lines
+        if not line:
+            continue
+        # Skip border lines (lines that are only border characters)
+        if all(c in '┏┓┗┛┃│┡┢┣┫┪┴┼╇╈╉╊╋┳┻║═╔╗╚╝╠╣╦╩╬━─├┤┬┴┼' for c in line):
+            continue
+        
+        # Check if this is a data row (contains │ or ┃)
+        if '│' in line or '┃' in line:
+            # Split by │ or ┃ and clean up
+            if '│' in line:
+                # Split by │ and keep all parts
+                parts = line.split('│')
+                # Remove leading/trailing empty parts (borders)
+                while parts and not parts[0].strip():
+                    parts.pop(0)
+                while parts and not parts[-1].strip():
+                    parts.pop()
+                cells = [c.strip() for c in parts]
+            else:
+                # Split by ┃ and keep all parts
+                parts = line.split('┃')
+                # Remove leading/trailing empty parts (borders)
+                while parts and not parts[0].strip():
+                    parts.pop(0)
+                while parts and not parts[-1].strip():
+                    parts.pop()
+                cells = [c.strip() for c in parts]
+            
+            # Skip header row - check if cells match column headers
+            if not header_found:
+                # This is likely the header row, skip it
+                header_found = True
+                continue
+            
+            # Add row if we have any cells (even if some are empty)
+            if cells:
+                # Pad or truncate to match column count
+                if len(cells) < len(data["columns"]):
+                    # Pad with empty strings
+                    cells.extend([""] * (len(data["columns"]) - len(cells)))
+                elif len(cells) > len(data["columns"]):
+                    # Truncate to match column count
+                    cells = cells[:len(data["columns"])]
+                rows_data.append(cells)
+    
+    data["rows"] = rows_data
+    return data
+
+
+def _extract_cell_text(cell) -> str:
+    """Extract plain text from a Rich cell object."""
+    if cell is None:
+        return ""
+    
+    # Try different methods to extract text
+    if isinstance(cell, str):
+        return cell
+    
+    if hasattr(cell, 'plain'):
+        return str(cell.plain)
+    
+    if hasattr(cell, '__rich__'):
+        # Render rich object to text
+        from rich.console import Console as RichConsole
+        from io import StringIO
+        cell_output = StringIO()
+        cell_console = RichConsole(file=cell_output, record=True, force_terminal=False)
+        cell_console.print(cell)
+        return cell_console.export_text(clear=False).strip()
+    
+    return str(cell)
 
 
 def _table_to_ascii(table: Table, width: int = PDF_TABLE_WIDTH) -> str:
@@ -127,13 +236,154 @@ def _build_pdf_path(settings: Settings, tenant_name: str, report_type: str, scan
     return base_dir / filename
 
 
+def _add_pdf_table(pdf, table_data: dict, col_widths: list[float] | None = None, center_table: bool = False):
+    """Add a table to PDF using fpdf2 table capabilities."""
+    if not table_data:
+        return
+    if not table_data.get("columns"):
+        return
+    # Allow empty rows - show at least header
+    rows = table_data.get("rows", [])
+    
+    # Calculate column widths if not provided
+    num_cols = len(table_data["columns"])
+    if col_widths is None:
+        page_width = pdf.w - 2 * pdf.l_margin
+        col_width = page_width / num_cols if num_cols > 0 else page_width
+        col_widths = [col_width] * num_cols
+    
+    # Calculate total table width
+    total_table_width = sum(col_widths)
+    
+    # Table title
+    if table_data.get("title"):
+        pdf.set_font("Helvetica", "B", 11)
+        if center_table:
+            # Center the title
+            title_width = pdf.get_string_width(table_data["title"])
+            pdf.set_x(pdf.l_margin + (pdf.w - 2 * pdf.l_margin - title_width) / 2)
+            pdf.cell(title_width, 8, table_data["title"], ln=True)
+        else:
+            pdf.cell(0, 8, table_data["title"], ln=True)
+        pdf.ln(2)
+    
+    # Header row
+    pdf.set_font("Helvetica", "B", 9)
+    pdf.set_fill_color(230, 230, 230)
+    # Calculate header row height based on content (text wrapping)
+    max_header_height = 7  # Minimum header height
+    header_cell_lines = []
+    for i, col_header in enumerate(table_data["columns"]):
+        if i < len(col_widths):
+            header_text = str(col_header) if col_header is not None else ""
+            # Ensure ASCII-compatible
+            try:
+                header_text.encode('latin-1')
+            except UnicodeEncodeError:
+                header_text = header_text.encode('ascii', 'replace').decode('ascii')
+            # Calculate height needed for header cell (with wrapping)
+            lines = pdf.multi_cell(col_widths[i], 7, header_text, border=0, align="L", split_only=True)
+            header_cell_lines.append(lines)
+            cell_height = len(lines) * 7
+            max_header_height = max(max_header_height, cell_height)
+    
+    # Draw header cells with text wrapping
+    x_start = pdf.get_x()
+    y_start = pdf.get_y()
+    
+    # Check if header fits on current page
+    if y_start + max_header_height > pdf.h - pdf.b_margin:
+        pdf.add_page()
+        x_start = pdf.l_margin
+        y_start = pdf.get_y()
+    
+    for i, col_header in enumerate(table_data["columns"]):
+        if i < len(col_widths):
+            x_pos = x_start + sum(col_widths[:i])
+            # Draw cell border and background
+            pdf.set_fill_color(230, 230, 230)
+            pdf.rect(x_pos, y_start, col_widths[i], max_header_height, style='FD')
+            # Draw text with wrapping
+            for line_idx, line in enumerate(header_cell_lines[i]):
+                pdf.set_xy(x_pos + 1, y_start + 1 + line_idx * 7)
+                pdf.cell(col_widths[i] - 2, 7, line, border=0, align="L", ln=0)
+    # Move to next row position
+    pdf.set_xy(x_start, y_start + max_header_height)
+    
+    # Data rows
+    pdf.set_font("Helvetica", size=8)
+    pdf.set_fill_color(255, 255, 255)
+    for row_idx, row in enumerate(rows):
+        # Alternate row colors for better readability
+        if row_idx % 2 == 1:
+            fill_color = (245, 245, 245)
+        else:
+            fill_color = (255, 255, 255)
+        
+        # Calculate row height based on content (text wrapping)
+        max_row_height = 6  # Minimum row height
+        cell_lines_list = []
+        for i, cell_value in enumerate(row):
+            if i < len(col_widths):
+                cell_text = str(cell_value) if cell_value is not None else ""
+                # Ensure ASCII-compatible
+                try:
+                    cell_text.encode('latin-1')
+                except UnicodeEncodeError:
+                    cell_text = cell_text.encode('ascii', 'replace').decode('ascii')
+                # Calculate height needed for this cell (with wrapping)
+                lines = pdf.multi_cell(col_widths[i], 6, cell_text, border=0, align="L", split_only=True)
+                cell_lines_list.append(lines)
+                cell_height = len(lines) * 6
+                max_row_height = max(max_row_height, cell_height)
+        
+        # Draw cells with proper height and text wrapping
+        x_start = pdf.get_x()
+        y_start = pdf.get_y()
+        
+        # Check if row fits on current page, if not add new page
+        if y_start + max_row_height > pdf.h - pdf.b_margin:
+            pdf.add_page()
+            x_start = pdf.l_margin
+            y_start = pdf.get_y()
+            # Redraw header if table spans multiple pages
+            pdf.set_font("Helvetica", "B", 9)
+            pdf.set_fill_color(230, 230, 230)
+            for i, col_header in enumerate(table_data["columns"]):
+                if i < len(col_widths):
+                    x_pos = x_start + sum(col_widths[:i])
+                    # Draw cell border and background
+                    pdf.rect(x_pos, y_start, col_widths[i], max_header_height, style='FD')
+                    # Draw text with wrapping
+                    for line_idx, line in enumerate(header_cell_lines[i]):
+                        pdf.set_xy(x_pos + 1, y_start + 1 + line_idx * 7)
+                        pdf.cell(col_widths[i] - 2, 7, line, border=0, align="L", ln=0)
+            y_start = y_start + max_header_height
+            pdf.set_font("Helvetica", size=8)
+        
+        for i, cell_value in enumerate(row):
+            if i < len(col_widths):
+                x_pos = x_start + sum(col_widths[:i])
+                # Draw cell border and background
+                pdf.set_fill_color(fill_color[0], fill_color[1], fill_color[2])
+                pdf.rect(x_pos, y_start, col_widths[i], max_row_height, style='FD')
+                # Draw text with wrapping
+                for line_idx, line in enumerate(cell_lines_list[i]):
+                    pdf.set_xy(x_pos + 1, y_start + 1 + line_idx * 6)
+                    pdf.cell(col_widths[i] - 2, 6, line, border=0, align="L", ln=0)
+        # Move to next row position
+        pdf.set_xy(x_start, y_start + max_row_height)
+    
+    pdf.ln(3)
+
+
 def _export_pdf_report(
     settings: Settings,
     tenant_name: str,
     report_type: str,
     scan_dt: datetime | None,
     title: str,
-    blocks: list[str],
+    blocks: list[str] | list[dict],
 ) -> Path:
     FPDF_cls = _load_fpdf()
     pdf_path = _build_pdf_path(settings, tenant_name, report_type, scan_dt)
@@ -148,25 +398,53 @@ def _export_pdf_report(
         pdf.cell(0, 8, f"Scan started: {scan_dt.replace(microsecond=0).isoformat(sep=' ')}", ln=True)
     pdf.ln(4)
 
-    line_height = 4.5
-
+    # Process blocks - can be either dict (table data) or str (legacy ASCII)
     for block in blocks:
         if not block:
             continue
-        pdf.set_font("Courier", size=9)
-        for raw_line in block.splitlines():
-            line = raw_line.rstrip()
-            # Replace any remaining Unicode characters with ASCII
-            line = _replace_unicode_to_ascii(line)
-            # Ensure line is ASCII-compatible
-            try:
-                line.encode('latin-1')
-            except UnicodeEncodeError:
-                # If encoding fails, replace problematic characters
-                line = line.encode('ascii', 'replace').decode('ascii')
-            pdf.set_x(pdf.l_margin)
-            pdf.cell(0, line_height, line if line else " ", ln=True)
-        pdf.ln(2)
+        if isinstance(block, dict):
+            # New format: table data
+            # Always add table, even if rows are empty (will show header)
+            if not block.get("rows") and block.get("columns"):
+                # Empty table - show header only
+                _add_pdf_table(pdf, block)
+                continue
+            
+            # Special handling for "Overall Risk" and "Last Scan" tables - make them 2x narrower
+            if block.get("title", "").startswith("Overall Risk") or block.get("title", "").startswith("Last Scan"):
+                page_width = pdf.w - 2 * pdf.l_margin
+                # Make table 2x narrower (half width)
+                table_width = page_width / 2
+                num_cols = len(block.get("columns", []))
+                if num_cols > 0:
+                    col_width = table_width / num_cols
+                    col_widths = [col_width] * num_cols
+                    # Center the table by adding left margin
+                    old_x = pdf.get_x()
+                    pdf.set_x(pdf.l_margin + (page_width - table_width) / 2)
+                    _add_pdf_table(pdf, block, col_widths=col_widths, center_table=True)
+                    # Reset x position
+                    pdf.set_x(pdf.l_margin)
+                else:
+                    _add_pdf_table(pdf, block)
+            else:
+                _add_pdf_table(pdf, block)
+        else:
+            # Legacy format: ASCII text
+            pdf.set_font("Courier", size=9)
+            for raw_line in block.splitlines():
+                line = raw_line.rstrip()
+                # Replace any remaining Unicode characters with ASCII
+                line = _replace_unicode_to_ascii(line)
+                # Ensure line is ASCII-compatible
+                try:
+                    line.encode('latin-1')
+                except UnicodeEncodeError:
+                    # If encoding fails, replace problematic characters
+                    line = line.encode('ascii', 'replace').decode('ascii')
+                pdf.set_x(pdf.l_margin)
+                pdf.cell(0, 4.5, line if line else " ", ln=True)
+            pdf.ln(2)
 
     pdf.output(str(pdf_path))
     return pdf_path
@@ -582,7 +860,7 @@ def show_last_scan_cmd(ctx: click.Context, tenant: str, pdf: bool) -> None:  # t
             return
 
         # Display scan info
-        scan_table = Table(title=f"Last Scan for {t.name}")
+        scan_table = Table(title=f"Last Scan for {t.name}", width=CONSOLE_TABLE_WIDTH)
         scan_table.add_column("Property")
         scan_table.add_column("Value")
         scan_table.add_row("Scan ID", str(last_scan.id))
@@ -590,13 +868,12 @@ def show_last_scan_cmd(ctx: click.Context, tenant: str, pdf: bool) -> None:  # t
         scan_table.add_row("Status", last_scan.status)
         scan_table.add_row("Started", _fmt_dt(last_scan.started_at))
         scan_table.add_row("Finished", _fmt_dt(last_scan.finished_at) if last_scan.finished_at else "N/A")
-        scan_table_text = _table_to_ascii(scan_table)
         console.print(scan_table)
-        pdf_blocks: list[str] = [scan_table_text]
+        pdf_blocks: list[dict | str] = [_table_to_data(scan_table)]
 
         # Display hosts and services
         for host in hosts:
-            host_table = Table(title=f"Host: {host.ip} ({host.hostname or 'No hostname'})")
+            host_table = Table(title=f"Host: {host.ip} ({host.hostname or 'No hostname'})", width=CONSOLE_TABLE_WIDTH)
             host_table.add_column("Port")
             host_table.add_column("Protocol")
             host_table.add_column("Service")
@@ -623,9 +900,8 @@ def show_last_scan_cmd(ctx: click.Context, tenant: str, pdf: bool) -> None:  # t
             else:
                 host_table.add_row("No services", "", "", "", "", "")
 
-            host_table_text = _table_to_ascii(host_table)
             console.print(host_table)
-            pdf_blocks.append(host_table_text)
+            pdf_blocks.append(_table_to_data(host_table))
             
             # Display vulnerabilities for this host
             vulnerabilities = s.scalars(
@@ -654,7 +930,7 @@ def show_last_scan_cmd(ctx: click.Context, tenant: str, pdf: bool) -> None:  # t
                             "version": svc.version or "",
                         })
                 
-                vuln_table = Table(title=f"Vulnerabilities for {host.ip}")
+                vuln_table = Table(title=f"Vulnerabilities for {host.ip}", width=CONSOLE_TABLE_WIDTH)
                 vuln_table.add_column("CVE")
                 vuln_table.add_column("Port")
                 vuln_table.add_column("Product")
@@ -714,19 +990,17 @@ def show_last_scan_cmd(ctx: click.Context, tenant: str, pdf: bool) -> None:  # t
                     percentile_str = f"{vuln.percentile:.2f}" if vuln.percentile is not None else "N/A"
                     vuln_table.add_row(vuln.cve_id, port_str, product_str, version_str, cvss_str, epss_str, percentile_str)
                 
-                vuln_table_text = _table_to_ascii(vuln_table)
                 console.print(vuln_table)
-                pdf_blocks.append(vuln_table_text)
+                pdf_blocks.append(_table_to_data(vuln_table))
                 
                 # Display overall exploit probability for host (only once per host)
                 if vulnerabilities[0].exploit_probability is not None:
-                    risk_table = Table(title=f"Overall Risk for {host.ip}")
+                    risk_table = Table(title=f"Overall Risk for {host.ip}", width=CONSOLE_TABLE_WIDTH)
                     risk_table.add_column("Metric")
                     risk_table.add_column("Value")
                     risk_table.add_row("Exploit Probability", f"{vulnerabilities[0].exploit_probability:.2%}")
-                    risk_table_text = _table_to_ascii(risk_table)
                     console.print(risk_table)
-                    pdf_blocks.append(risk_table_text)
+                    pdf_blocks.append(_table_to_data(risk_table))
 
         if pdf:
             scan_dt = last_scan.started_at if isinstance(last_scan.started_at, datetime) else None
