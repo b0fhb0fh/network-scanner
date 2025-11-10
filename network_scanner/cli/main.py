@@ -155,69 +155,6 @@ def _extract_cell_text(cell) -> str:
         return cell_console.export_text(clear=False).strip()
     
     return str(cell)
-
-
-def _table_to_ascii(table: Table, width: int = PDF_TABLE_WIDTH) -> str:
-    # Use StringIO to prevent output to stdout
-    output = io.StringIO()
-    capture_console = Console(file=output, width=width, record=True, force_terminal=False)
-    capture_console.print(table)
-    text = capture_console.export_text(clear=False)
-    capture_console.clear()
-    # Replace Unicode box-drawing characters with ASCII equivalents
-    text = _replace_unicode_to_ascii(text)
-    return text.rstrip()
-
-
-def _replace_unicode_to_ascii(text: str) -> str:
-    """Replace Unicode box-drawing characters with ASCII equivalents for PDF export."""
-    replacements = {
-        "┏": "+",
-        "┓": "+",
-        "┗": "+",
-        "┛": "+",
-        "┃": "|",
-        "━": "-",
-        "┡": "+",
-        "┢": "+",
-        "┣": "+",
-        "┫": "+",
-        "┪": "+",
-        "┴": "+",
-        "┼": "+",
-        "╇": "+",
-        "╈": "+",
-        "╉": "+",
-        "╊": "+",
-        "╋": "+",
-        "┳": "+",
-        "┻": "+",
-        "╋": "+",
-        "│": "|",
-        "─": "-",
-        "├": "+",
-        "┤": "+",
-        "┬": "+",
-        "┴": "+",
-        "┼": "+",
-        "║": "|",
-        "═": "=",
-        "╔": "+",
-        "╗": "+",
-        "╚": "+",
-        "╝": "+",
-        "╠": "+",
-        "╣": "+",
-        "╦": "+",
-        "╩": "+",
-        "╬": "+",
-    }
-    result = text
-    for unicode_char, ascii_char in replacements.items():
-        result = result.replace(unicode_char, ascii_char)
-    return result
-
-
 def _sanitize_filename_component(value: str) -> str:
     allowed = {"-", "_"}
     return "".join(c if c.isalnum() or c in allowed else "_" for c in value)
@@ -383,7 +320,7 @@ def _export_pdf_report(
     report_type: str,
     scan_dt: datetime | None,
     title: str,
-    blocks: list[str] | list[dict],
+    blocks: list[dict],
 ) -> Path:
     FPDF_cls = _load_fpdf()
     pdf_path = _build_pdf_path(settings, tenant_name, report_type, scan_dt)
@@ -398,53 +335,31 @@ def _export_pdf_report(
         pdf.cell(0, 8, f"Scan started: {scan_dt.replace(microsecond=0).isoformat(sep=' ')}", ln=True)
     pdf.ln(4)
 
-    # Process blocks - can be either dict (table data) or str (legacy ASCII)
+    # Process table blocks
     for block in blocks:
         if not block:
             continue
-        if isinstance(block, dict):
-            # New format: table data
-            # Always add table, even if rows are empty (will show header)
-            if not block.get("rows") and block.get("columns"):
-                # Empty table - show header only
-                _add_pdf_table(pdf, block)
-                continue
-            
-            # Special handling for "Overall Risk" and "Last Scan" tables - make them 2x narrower
-            if block.get("title", "").startswith("Overall Risk") or block.get("title", "").startswith("Last Scan"):
-                page_width = pdf.w - 2 * pdf.l_margin
-                # Make table 2x narrower (half width)
-                table_width = page_width / 2
-                num_cols = len(block.get("columns", []))
-                if num_cols > 0:
-                    col_width = table_width / num_cols
-                    col_widths = [col_width] * num_cols
-                    # Center the table by adding left margin
-                    old_x = pdf.get_x()
-                    pdf.set_x(pdf.l_margin + (page_width - table_width) / 2)
-                    _add_pdf_table(pdf, block, col_widths=col_widths, center_table=True)
-                    # Reset x position
-                    pdf.set_x(pdf.l_margin)
-                else:
-                    _add_pdf_table(pdf, block)
+        # Always add table, even if rows are empty (will show header)
+        if not block.get("rows") and block.get("columns"):
+            _add_pdf_table(pdf, block)
+            continue
+
+        # Special handling for "Overall Risk" and "Last Scan" tables - make them 2x narrower
+        if block.get("title", "").startswith("Overall Risk") or block.get("title", "").startswith("Last Scan"):
+            page_width = pdf.w - 2 * pdf.l_margin
+            table_width = page_width / 2
+            num_cols = len(block.get("columns", []))
+            if num_cols > 0:
+                col_width = table_width / num_cols
+                col_widths = [col_width] * num_cols
+                old_x = pdf.get_x()
+                pdf.set_x(pdf.l_margin + (page_width - table_width) / 2)
+                _add_pdf_table(pdf, block, col_widths=col_widths, center_table=True)
+                pdf.set_x(pdf.l_margin)
             else:
                 _add_pdf_table(pdf, block)
         else:
-            # Legacy format: ASCII text
-            pdf.set_font("Courier", size=9)
-            for raw_line in block.splitlines():
-                line = raw_line.rstrip()
-                # Replace any remaining Unicode characters with ASCII
-                line = _replace_unicode_to_ascii(line)
-                # Ensure line is ASCII-compatible
-                try:
-                    line.encode('latin-1')
-                except UnicodeEncodeError:
-                    # If encoding fails, replace problematic characters
-                    line = line.encode('ascii', 'replace').decode('ascii')
-                pdf.set_x(pdf.l_margin)
-                pdf.cell(0, 4.5, line if line else " ", ln=True)
-            pdf.ln(2)
+            _add_pdf_table(pdf, block)
 
     pdf.output(str(pdf_path))
     return pdf_path
@@ -869,7 +784,7 @@ def show_last_scan_cmd(ctx: click.Context, tenant: str, pdf: bool) -> None:  # t
         scan_table.add_row("Started", _fmt_dt(last_scan.started_at))
         scan_table.add_row("Finished", _fmt_dt(last_scan.finished_at) if last_scan.finished_at else "N/A")
         console.print(scan_table)
-        pdf_blocks: list[dict | str] = [_table_to_data(scan_table)]
+        pdf_blocks: list[dict] = [_table_to_data(scan_table)]
 
         # Display hosts and services
         for host in hosts:
@@ -1276,11 +1191,11 @@ def diff_scans_cmd(ctx: click.Context, tenant: str, pdf: bool) -> None:  # type:
         info_table.add_row("Newer Started", _fmt_dt(newer.started_at))
         info_table.add_row("Older Scan ID", str(older.id))
         info_table.add_row("Older Started", _fmt_dt(older.started_at))
-        info_table_text = _table_to_ascii(info_table)
+        info_table_data = _table_to_data(info_table)
         console.print(info_table)
         console.print()
 
-        pdf_blocks: list[str] = [info_table_text]
+        pdf_blocks: list[dict] = [info_table_data]
 
         # Hosts added/removed
         if hosts_added or hosts_removed:
@@ -1291,10 +1206,10 @@ def diff_scans_cmd(ctx: click.Context, tenant: str, pdf: bool) -> None:  # type:
                 hr_table.add_row("Added", ", ".join(hosts_added))
             if hosts_removed:
                 hr_table.add_row("Removed", ", ".join(hosts_removed))
-            hr_table_text = _table_to_ascii(hr_table)
+            hr_table_data = _table_to_data(hr_table)
             console.print(hr_table)
             console.print()
-            pdf_blocks.append(hr_table_text)
+            pdf_blocks.append(hr_table_data)
         else:
             console.print("No host changes", style="green")
             console.print()
@@ -1302,7 +1217,7 @@ def diff_scans_cmd(ctx: click.Context, tenant: str, pdf: bool) -> None:  # type:
             hr_table.add_column("Type")
             hr_table.add_column("Hosts")
             hr_table.add_row("Info", "No host changes")
-            pdf_blocks.append(_table_to_ascii(hr_table))
+            pdf_blocks.append(_table_to_data(hr_table))
 
         # Port diffs for common hosts
         any_port_changes = False
@@ -1327,10 +1242,10 @@ def diff_scans_cmd(ctx: click.Context, tenant: str, pdf: bool) -> None:  # type:
                     "Closed",
                     ", ".join(f"{proto}:{port}" for proto, port in removed_ports),
                 )
-            ht_text = _table_to_ascii(ht)
+            ht_data = _table_to_data(ht)
             console.print(ht)
             console.print()
-            pdf_blocks.append(ht_text)
+            pdf_blocks.append(ht_data)
 
         if not any_port_changes:
             console.print("No port changes on common hosts", style="green")
@@ -1338,7 +1253,7 @@ def diff_scans_cmd(ctx: click.Context, tenant: str, pdf: bool) -> None:  # type:
             port_table = Table(title="Port Changes")
             port_table.add_column("Info")
             port_table.add_row("No port changes on common hosts")
-            pdf_blocks.append(_table_to_ascii(port_table))
+            pdf_blocks.append(_table_to_data(port_table))
 
         if pdf:
             scan_dt = newer.started_at if isinstance(newer.started_at, datetime) else None
