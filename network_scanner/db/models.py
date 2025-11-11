@@ -12,6 +12,7 @@ from sqlalchemy import (
     Float,
     UniqueConstraint,
     create_engine,
+    Text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -131,6 +132,55 @@ class Vulnerability(Base):
 
     __table_args__ = (
         UniqueConstraint("host_id", "cve_id", name="uq_vulnerability_host_cve"),
+    )
+
+
+class NucleiScan(Base):
+    __tablename__ = "nuclei_scan"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenant.id", ondelete="CASCADE"), nullable=False, index=True)
+    scan_id: Mapped[Optional[int]] = mapped_column(ForeignKey("scan.id", ondelete="SET NULL"), nullable=True, index=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="running")  # running|done|failed
+    templates: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    target_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    report_path: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
+    nuclei_version: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    ai_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    tenant: Mapped[Tenant] = relationship("Tenant")
+    scan: Mapped[Optional[Scan]] = relationship("Scan")
+    findings: Mapped[list["NucleiFinding"]] = relationship(
+        "NucleiFinding",
+        back_populates="nuclei_scan",
+        cascade="all, delete-orphan",
+    )
+
+
+class NucleiFinding(Base):
+    __tablename__ = "nuclei_finding"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    nuclei_scan_id: Mapped[int] = mapped_column(ForeignKey("nuclei_scan.id", ondelete="CASCADE"), nullable=False, index=True)
+    host_id: Mapped[Optional[int]] = mapped_column(ForeignKey("host.id", ondelete="SET NULL"), nullable=True, index=True)
+    target: Mapped[str] = mapped_column(String(512), nullable=False)
+    template_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    template_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    severity: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    evidence: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    references: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    tags: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    matched_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+    matched_url: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
+
+    nuclei_scan: Mapped[NucleiScan] = relationship("NucleiScan", back_populates="findings")
+    host: Mapped[Optional[Host]] = relationship("Host")
+
+    __table_args__ = (
+        UniqueConstraint("nuclei_scan_id", "template_id", "target", "matched_url", name="uq_nuclei_finding_unique"),
     )
 
 

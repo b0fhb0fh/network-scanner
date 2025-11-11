@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import io
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -9,6 +10,7 @@ from typing import Optional
 import click
 from rich.console import Console
 from rich.table import Table
+from rich.panel import Panel
 
 import importlib
 
@@ -38,8 +40,13 @@ from network_scanner.db.dao import (
     get_tenant_exclude_by_id,
     update_tenant_exclude,
     delete_tenant_exclude,
+    list_nuclei_scans,
+    get_nuclei_scan_by_id,
+    list_nuclei_findings,
+    delete_nuclei_scan,
 )
-from network_scanner.db.models import Scan, Host, Service, Vulnerability
+from network_scanner.db.models import Scan, Host, Service, Vulnerability, NucleiScan, NucleiFinding
+from network_scanner.scan.nuclei_runner import run_nuclei_scan_for_scan
 from sqlalchemy import select, desc
 
 
@@ -917,6 +924,32 @@ def show_last_scan_cmd(ctx: click.Context, tenant: str, pdf: bool) -> None:  # t
                     console.print(risk_table)
                     pdf_blocks.append(_table_to_data(risk_table))
 
+        # Display nuclei findings if available for this scan
+        nuclei_scans = list_nuclei_scans(s, tenant=t, scan=last_scan)
+        if nuclei_scans:
+            latest_nuclei_scan = nuclei_scans[0]  # Most recent
+            nuclei_findings = list_nuclei_findings(s, latest_nuclei_scan)
+            if nuclei_findings:
+                console.print()
+                nuclei_summary_table = Table(title=f"Nuclei Findings Summary for {t.name}", width=CONSOLE_TABLE_WIDTH)
+                nuclei_summary_table.add_column("Property")
+                nuclei_summary_table.add_column("Value")
+                nuclei_summary_table.add_row("Nuclei Scan ID", str(latest_nuclei_scan.id))
+                nuclei_summary_table.add_row("Total Findings", str(len(nuclei_findings)))
+                severity_counts = Counter((f.severity or "UNKNOWN").upper() for f in nuclei_findings)
+                for sev in ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]:
+                    if sev in severity_counts:
+                        nuclei_summary_table.add_row(f"{sev} Findings", str(severity_counts[sev]))
+                console.print(nuclei_summary_table)
+                pdf_blocks.append(_table_to_data(nuclei_summary_table))
+                
+                if latest_nuclei_scan.ai_summary:
+                    console.print(Panel(latest_nuclei_scan.ai_summary, title="AI Summary", expand=False))
+                    ai_summary_table = Table(title="AI Summary", width=CONSOLE_TABLE_WIDTH)
+                    ai_summary_table.add_column("Summary")
+                    ai_summary_table.add_row(latest_nuclei_scan.ai_summary)
+                    pdf_blocks.append(_table_to_data(ai_summary_table))
+
         if pdf:
             scan_dt = last_scan.started_at if isinstance(last_scan.started_at, datetime) else None
             pdf_path = _export_pdf_report(
@@ -931,6 +964,153 @@ def show_last_scan_cmd(ctx: click.Context, tenant: str, pdf: bool) -> None:  # t
             if logger:
                 logger.info("Last scan PDF generated: tenant=%s path=%s", t.name, pdf_path)
 
+
+@cli.command("show-nuclei")
+@click.option("--tenant", required=True, help="Tenant name")
+@click.option("--nuclei-scan-id", type=int, required=False, default=None, help="Specific nuclei scan id (defaults to latest)")
+@click.option("--scan-id", type=int, required=False, default=None, help="Filter by base scan id")
+@click.option("--pdf", is_flag=True, help="Export report to PDF")
+@click.pass_context
+def show_nuclei_cmd(  # type: ignore[override]
+    ctx: click.Context,
+    tenant: str,
+    nuclei_scan_id: Optional[int],
+    scan_id: Optional[int],
+    pdf: bool,
+) -> None:
+    """Display nuclei scan findings for a tenant."""
+    settings: Settings = ctx.obj["settings"]
+    logger = ctx.obj.get("logger")
+    engine = create_sqlite_engine(settings.sqlite_path)
+    init_db(engine)
+
+    with get_session(engine) as s:
+        tenant_obj = get_tenant_by_name(s, tenant)
+        if not tenant_obj:
+            console.print(f"Tenant '{tenant}' not found", style="red")
+            sys.exit(1)
+
+        scan_obj: Scan | None = None
+        if scan_id is not None:
+            scan_obj = get_scan_by_id(s, scan_id)
+            if not scan_obj or scan_obj.tenant_id != tenant_obj.id:
+                console.print(f"Scan id={scan_id} not found for tenant '{tenant_obj.name}'", style="red")
+                sys.exit(1)
+
+        nuclei_scan: NucleiScan | None = None
+        if nuclei_scan_id is not None:
+            nuclei_scan = get_nuclei_scan_by_id(s, nuclei_scan_id)
+            if not nuclei_scan or nuclei_scan.tenant_id != tenant_obj.id:
+                console.print(f"Nuclei scan id={nuclei_scan_id} not found for tenant '{tenant_obj.name}'", style="red")
+                sys.exit(1)
+        else:
+            scans = list_nuclei_scans(s, tenant=tenant_obj, scan=scan_obj)
+            nuclei_scan = scans[0] if scans else None
+
+        if not nuclei_scan:
+            console.print("No nuclei scans found for the specified parameters", style="yellow")
+            return
+
+        findings = list_nuclei_findings(s, nuclei_scan)
+
+    if logger:
+        logger.info(
+            "Show nuclei scan: tenant=%s nuclei_scan_id=%s findings=%d",
+            tenant,
+            nuclei_scan.id,
+            len(findings),
+        )
+
+    pdf_blocks: list[dict] = []
+
+    meta_table = Table(title=f"Nuclei Scan for {tenant}", width=CONSOLE_TABLE_WIDTH)
+    meta_table.add_column("Property")
+    meta_table.add_column("Value")
+    meta_table.add_row("Nuclei Scan ID", str(nuclei_scan.id))
+    meta_table.add_row("Base Scan ID", str(nuclei_scan.scan_id) if nuclei_scan.scan_id else "N/A")
+    meta_table.add_row("Status", nuclei_scan.status)
+    meta_table.add_row("Started", _fmt_dt(nuclei_scan.started_at))
+    meta_table.add_row("Finished", _fmt_dt(nuclei_scan.finished_at))
+    meta_table.add_row("Templates", nuclei_scan.templates or "-")
+    meta_table.add_row("Targets", str(nuclei_scan.target_count))
+    meta_table.add_row("Findings", str(len(findings)))
+    meta_table.add_row("Report Path", nuclei_scan.report_path or "-")
+    console.print(meta_table)
+    pdf_blocks.append(_table_to_data(meta_table))
+
+    if nuclei_scan.ai_summary:
+        console.print(Panel(nuclei_scan.ai_summary, title="AI Summary", expand=False))
+        summary_table = Table(title="AI Summary", width=CONSOLE_TABLE_WIDTH)
+        summary_table.add_column("Summary")
+        summary_table.add_row(nuclei_scan.ai_summary)
+        pdf_blocks.append(_table_to_data(summary_table))
+
+    severity_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4, "UNKNOWN": 5}
+
+    if findings:
+        severity_counter = Counter((finding.severity or "UNKNOWN").upper() for finding in findings)
+        breakdown_table = Table(title="Findings by Severity", width=CONSOLE_TABLE_WIDTH)
+        breakdown_table.add_column("Severity")
+        breakdown_table.add_column("Count")
+        for severity, count in sorted(severity_counter.items(), key=lambda item: severity_order.get(item[0], 99)):
+            breakdown_table.add_row(severity, str(count))
+        console.print(breakdown_table)
+        pdf_blocks.append(_table_to_data(breakdown_table))
+
+        findings_table = Table(title="Nuclei Findings", width=CONSOLE_TABLE_WIDTH)
+        findings_table.add_column("Severity", style="bold")
+        findings_table.add_column("Target")
+        findings_table.add_column("Template")
+        findings_table.add_column("Name")
+        findings_table.add_column("Description")
+        findings_table.add_column("References")
+
+        sorted_findings = sorted(
+            findings,
+            key=lambda f: (
+                severity_order.get((f.severity or "UNKNOWN").upper(), 99),
+                f.target,
+                f.template_id or "",
+            ),
+        )
+
+        for finding in sorted_findings:
+            severity = (finding.severity or "UNKNOWN").upper()
+            template_label = finding.template_id or "-"
+            if finding.template_name and finding.template_name != finding.template_id:
+                template_label = f"{finding.template_name} ({template_label})"
+            description = (finding.description or "").strip()
+            if len(description) > 200:
+                description = description[:197] + "..."
+            references = (finding.references or "").strip()
+            if references:
+                refs_lines = references.splitlines()
+                if len(refs_lines) > 3:
+                    references = "\n".join(refs_lines[:3]) + "\n..."
+            findings_table.add_row(
+                severity,
+                finding.target,
+                template_label,
+                finding.template_name or "-",
+                description or "-",
+                references or "-",
+            )
+
+        console.print(findings_table)
+        pdf_blocks.append(_table_to_data(findings_table))
+    else:
+        console.print("No findings recorded for this nuclei scan", style="green")
+
+    if pdf:
+        pdf_path = _export_pdf_report(
+            settings=settings,
+            tenant_name=tenant,
+            report_type="nuclei",
+            scan_dt=nuclei_scan.started_at,
+            title=f"Nuclei Report for {tenant}",
+            blocks=pdf_blocks,
+        )
+        console.print(f"PDF exported to {pdf_path}")
 
 @cli.command()
 @click.option("--tenant", required=True, help="Tenant name")
@@ -1312,11 +1492,12 @@ def list_networks_cmd(ctx: click.Context, tenant: Optional[str]) -> None:  # typ
 @click.option("--mode", type=click.Choice(["tcp", "all"]), default="tcp")
 @click.option("--service-info", is_flag=True, help="Enable nmap service/version detection (-sV)")
 @click.option("--vulners", is_flag=True, help="Enable nmap vulners script (requires --service-info)")
+@click.option("--nuclei", is_flag=True, help="Run nuclei web scan after nmap parse")
 @click.option("--iL", "input_list", type=click.Path(path_type=Path, exists=True, dir_okay=False), required=False, help="File with targets for masscan (-iL). If set, targets are taken from file, not from DB")
 @click.option("--all-tenants", is_flag=True, help="Scan all tenants sequentially with their individual settings")
 @click.option("--rate", "rate_override", type=click.IntRange(min=1), required=False, help="Override masscan rate for this run")
 @click.pass_context
-def scan_cmd(ctx: click.Context, tenant: Optional[str], mode: str, service_info: bool, vulners: bool, input_list: Optional[Path], all_tenants: bool, rate_override: Optional[int]) -> None:  # type: ignore[override]
+def scan_cmd(ctx: click.Context, tenant: Optional[str], mode: str, service_info: bool, vulners: bool, nuclei: bool, input_list: Optional[Path], all_tenants: bool, rate_override: Optional[int]) -> None:  # type: ignore[override]
     """Run scan(s).
 
     - Single tenant: specify --tenant NAME
@@ -1345,15 +1526,15 @@ def scan_cmd(ctx: click.Context, tenant: Optional[str], mode: str, service_info:
                 console.print("No tenants found", style="yellow")
                 return
             for t in tenants:
-                if logger:
                     logger.info(
-                        "Scan requested (all-tenants): tenant=%s mode=%s service_info=%s rate=%s",
+                        "Scan requested (all-tenants): tenant=%s mode=%s service_info=%s nuclei=%s rate=%s",
                         t.name,
                         mode,
                         service_info,
+                        str(nuclei),
                         str(rate_override) if rate_override is not None else "(default)",
                     )
-                run_scan_for_tenant(
+                    run_scan_for_tenant(
                     settings,
                     tenant_name=t.name,
                     mode=mode,
@@ -1361,6 +1542,7 @@ def scan_cmd(ctx: click.Context, tenant: Optional[str], mode: str, service_info:
                     input_list=None,
                     rate_override=rate_override,
                     vulners=vulners,
+                    nuclei=nuclei,
                 )
         return
 
@@ -1369,10 +1551,11 @@ def scan_cmd(ctx: click.Context, tenant: Optional[str], mode: str, service_info:
         sys.exit(1)
     if logger:
         logger.info(
-            "Scan requested: tenant=%s mode=%s service_info=%s iL=%s rate=%s",
+            "Scan requested: tenant=%s mode=%s service_info=%s nuclei=%s iL=%s rate=%s",
             tenant,
             mode,
             service_info,
+            str(nuclei),
             str(input_list) if input_list else "",
             str(rate_override) if rate_override is not None else "(default)",
         )
@@ -1384,6 +1567,93 @@ def scan_cmd(ctx: click.Context, tenant: Optional[str], mode: str, service_info:
         input_list=input_list,
         rate_override=rate_override,
         vulners=vulners,
+        nuclei=nuclei,
     )
 
+
+@cli.command("scan-nuclei")
+@click.option("--tenant", required=True, help="Tenant name")
+@click.option("--scan-id", type=int, required=False, default=None, help="Reuse results of specific scan id (defaults to latest scan for tenant)")
+@click.pass_context
+def scan_nuclei_cmd(ctx: click.Context, tenant: str, scan_id: Optional[int]) -> None:  # type: ignore[override]
+    """Run nuclei scan for an existing scan (or the latest one) without rerunning masscan/nmap."""
+    settings: Settings = ctx.obj["settings"]
+    logger = ctx.obj.get("logger")
+    engine = create_sqlite_engine(settings.sqlite_path)
+    init_db(engine)
+
+    with get_session(engine) as s:
+        tenant_obj = get_tenant_by_name(s, tenant)
+        if not tenant_obj:
+            console.print(f"Tenant '{tenant}' not found", style="red")
+            sys.exit(1)
+
+        scan_obj: Scan | None = None
+        if scan_id is not None:
+            scan_obj = get_scan_by_id(s, scan_id)
+            if not scan_obj or scan_obj.tenant_id != tenant_obj.id:
+                console.print(f"Scan id={scan_id} not found for tenant '{tenant_obj.name}'", style="red")
+                sys.exit(1)
+        else:
+            scan_obj = (
+                s.scalar(
+                    select(Scan)
+                    .where(Scan.tenant_id == tenant_obj.id)
+                    .order_by(Scan.started_at.desc())
+                )
+            )
+            if not scan_obj:
+                console.print(f"No scans found for tenant '{tenant_obj.name}'", style="yellow")
+                sys.exit(1)
+
+        scan_started = scan_obj.started_at or datetime.now(timezone.utc)
+        output_dir = settings.data_dir / tenant_obj.name / scan_started.strftime("%Y%m%d")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        scan_id_value = scan_obj.id
+        tenant_name = tenant_obj.name
+
+    if logger:
+        logger.info("Running nuclei scan: tenant=%s scan_id=%s", tenant_name, scan_id_value)
+
+    run_nuclei_scan_for_scan(
+        engine=engine,
+        settings=settings,
+        tenant_name=tenant_name,
+        scan_id=scan_id_value,
+        output_dir=output_dir,
+        logger=logger,
+    )
+
+
+@cli.command("delete-nuclei")
+@click.option("--tenant", required=True, help="Tenant name")
+@click.option("--nuclei-scan-id", type=int, required=True, help="Nuclei scan id to delete")
+@click.option("--yes", is_flag=True, help="Confirm deletion")
+@click.pass_context
+def delete_nuclei_cmd(ctx: click.Context, tenant: str, nuclei_scan_id: int, yes: bool) -> None:  # type: ignore[override]
+    """Delete a nuclei scan and all its findings (requires --yes)."""
+    if not yes:
+        console.print("Use --yes to confirm deletion", style="yellow")
+        sys.exit(1)
+    settings: Settings = ctx.obj["settings"]
+    logger = ctx.obj.get("logger")
+    engine = create_sqlite_engine(settings.sqlite_path)
+    init_db(engine)
+    
+    with get_session(engine) as s:
+        tenant_obj = get_tenant_by_name(s, tenant)
+        if not tenant_obj:
+            console.print(f"Tenant '{tenant}' not found", style="red")
+            sys.exit(1)
+        
+        nuclei_scan = get_nuclei_scan_by_id(s, nuclei_scan_id)
+        if not nuclei_scan or nuclei_scan.tenant_id != tenant_obj.id:
+            console.print(f"Nuclei scan id={nuclei_scan_id} not found for tenant '{tenant}'", style="red")
+            sys.exit(1)
+        
+        scan_id = nuclei_scan.scan_id
+        delete_nuclei_scan(s, nuclei_scan)
+        if logger:
+            logger.info("Nuclei scan deleted: id=%s tenant=%s scan_id=%s", nuclei_scan_id, tenant, scan_id)
+        console.print(f"Deleted nuclei scan id={nuclei_scan_id} for tenant '{tenant}'")
 

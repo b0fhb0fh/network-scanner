@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
@@ -8,7 +9,19 @@ from sqlalchemy import create_engine, select, event
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
-from .models import Base, Tenant, Network, Scan, Host, Service, TenantPorts, TenantExclude, Vulnerability
+from .models import (
+    Base,
+    Tenant,
+    Network,
+    Scan,
+    Host,
+    Service,
+    TenantPorts,
+    TenantExclude,
+    Vulnerability,
+    NucleiScan,
+    NucleiFinding,
+)
 
 
 def create_sqlite_engine(db_path: Path) -> Engine:
@@ -80,6 +93,15 @@ def init_db(engine: Engine) -> None:
     except Exception:
         # If migration fails, try to create all tables (for new DBs)
         Base.metadata.create_all(engine)
+
+    # Ensure nuclei tables exist (create_all above should create it for new DBs)
+    try:
+        with engine.begin() as conn:
+            info = list(conn.exec_driver_sql("PRAGMA table_info('nuclei_scan')").fetchall())
+            if not info:
+                Base.metadata.create_all(engine, tables=[NucleiScan.__table__, NucleiFinding.__table__])
+    except Exception:
+        Base.metadata.create_all(engine, tables=[NucleiScan.__table__, NucleiFinding.__table__])
 
 
 @contextmanager
@@ -214,5 +236,137 @@ def update_tenant_exclude(session: Session, item: TenantExclude, *, target: str)
 
 def delete_tenant_exclude(session: Session, item: TenantExclude) -> None:
     session.delete(item)
+    session.flush()
+
+
+# --- Nuclei scan helpers ---
+
+
+def create_nuclei_scan(
+    session: Session,
+    tenant: Tenant,
+    *,
+    scan: Scan | None = None,
+    templates: str | None = None,
+    target_count: int = 0,
+    nuclei_version: str | None = None,
+) -> NucleiScan:
+    item = NucleiScan(
+        tenant_id=tenant.id,
+        scan_id=scan.id if scan else None,
+        templates=templates,
+        target_count=target_count,
+        nuclei_version=nuclei_version,
+    )
+    session.add(item)
+    session.flush()
+    return item
+
+
+def get_nuclei_scan_by_id(session: Session, nuclei_scan_id: int) -> NucleiScan | None:
+    return session.get(NucleiScan, nuclei_scan_id)
+
+
+def list_nuclei_scans(
+    session: Session,
+    *,
+    tenant: Tenant | None = None,
+    scan: Scan | None = None,
+) -> list[NucleiScan]:
+    stmt = select(NucleiScan)
+    if tenant is not None:
+        stmt = stmt.where(NucleiScan.tenant_id == tenant.id)
+    if scan is not None:
+        stmt = stmt.where(NucleiScan.scan_id == scan.id)
+    stmt = stmt.order_by(NucleiScan.started_at.desc())
+    return list(session.scalars(stmt))
+
+
+def update_nuclei_scan(
+    session: Session,
+    nuclei_scan: NucleiScan,
+    *,
+    status: str | None = None,
+    finished_at: datetime | None = None,
+    target_count: int | None = None,
+    report_path: str | None = None,
+    ai_summary: str | None = None,
+    nuclei_version: str | None = None,
+) -> NucleiScan:
+    if status is not None:
+        nuclei_scan.status = status
+    if finished_at is not None:
+        nuclei_scan.finished_at = finished_at
+    if target_count is not None:
+        nuclei_scan.target_count = target_count
+    if report_path is not None:
+        nuclei_scan.report_path = report_path
+    if ai_summary is not None:
+        nuclei_scan.ai_summary = ai_summary
+    if nuclei_version is not None:
+        nuclei_scan.nuclei_version = nuclei_version
+    session.flush()
+    return nuclei_scan
+
+
+def delete_nuclei_scan(session: Session, nuclei_scan: NucleiScan) -> None:
+    # Explicitly delete all findings first (even though CASCADE should handle it)
+    # This ensures proper cleanup and avoids potential SQLite issues
+    delete_nuclei_findings_for_scan(session, nuclei_scan)
+    session.delete(nuclei_scan)
+    session.flush()
+
+
+def add_nuclei_finding(
+    session: Session,
+    nuclei_scan: NucleiScan,
+    *,
+    host: Host | None,
+    target: str,
+    template_id: str | None,
+    template_name: str | None,
+    severity: str | None,
+    description: str | None,
+    evidence: str | None,
+    references: str | None,
+    tags: str | None,
+    matched_url: str | None,
+    matched_at: datetime | None = None,
+) -> NucleiFinding:
+    finding = NucleiFinding(
+        nuclei_scan_id=nuclei_scan.id,
+        host_id=host.id if host else None,
+        target=target,
+        template_id=template_id,
+        template_name=template_name,
+        severity=severity,
+        description=description,
+        evidence=evidence,
+        references=references,
+        tags=tags,
+        matched_url=matched_url,
+        matched_at=matched_at or datetime.now(timezone.utc),
+    )
+    session.add(finding)
+    session.flush()
+    return finding
+
+
+def list_nuclei_findings(
+    session: Session,
+    nuclei_scan: NucleiScan,
+    *,
+    severity: str | None = None,
+) -> list[NucleiFinding]:
+    stmt = select(NucleiFinding).where(NucleiFinding.nuclei_scan_id == nuclei_scan.id)
+    if severity:
+        stmt = stmt.where(NucleiFinding.severity == severity)
+    stmt = stmt.order_by(NucleiFinding.matched_at.desc())
+    return list(session.scalars(stmt))
+
+
+def delete_nuclei_findings_for_scan(session: Session, nuclei_scan: NucleiScan) -> None:
+    for finding in session.scalars(select(NucleiFinding).where(NucleiFinding.nuclei_scan_id == nuclei_scan.id)):
+        session.delete(finding)
     session.flush()
 

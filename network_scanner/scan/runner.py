@@ -13,6 +13,7 @@ from network_scanner.config.logging_utils import get_app_logger
 from network_scanner.db.dao import create_sqlite_engine, get_session, init_db, get_tenant_by_name, get_tenant_ports, list_tenant_excludes
 from network_scanner.db.models import Scan, Host, Service
 from network_scanner.parsers.nmap_xml import parse_nmap_xml_into_db
+from network_scanner.scan.nuclei_runner import run_nuclei_scan_for_scan
 
 
 def _run(cmd: list[str], cwd: Path | None = None) -> None:
@@ -28,6 +29,7 @@ def run_scan_for_tenant(
     input_list: Optional[Path] = None,
     rate_override: Optional[int] = None,
     vulners: bool = False,
+    nuclei: bool = False,
 ) -> None:
     import masscan  # python-masscan
 
@@ -252,5 +254,18 @@ def run_scan_for_tenant(
         logger.info("Scan finished: tenant=%s mode=%s results saved to %s", tenant_name_local, mode, str(date_dir / "nmap.xml"))
     else:
         logger.info("Scan finished with errors: tenant=%s mode=%s (parsing failed)", tenant_name_local, mode)
+
+    if parse_ok and nuclei:
+        try:
+            run_nuclei_scan_for_scan(
+                engine=engine,
+                settings=settings,
+                tenant_name=tenant_name_local,
+                scan_id=current_scan_id,
+                output_dir=date_dir,
+                logger=logger,
+            )
+        except Exception as nuclei_exc:
+            logger.error("Nuclei execution failed: %s", nuclei_exc)
 
 
