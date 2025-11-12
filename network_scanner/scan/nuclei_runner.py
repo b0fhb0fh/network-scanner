@@ -29,27 +29,19 @@ def _infer_scheme(service: Service) -> str | None:
     port = service.port
     name = (service.name or "").lower()
     product = (service.product or "").lower()
-    if port in {443, 8443, 9443, 10443, 4443} or "https" in name or "https" in product or "ssl" in name or "tls" in name:
+    if "https" in name or "https" in product:
         return "https"
-    if port in {80, 8080, 8000, 8888, 8081, 81} or "http" in name or "http" in product:
+    if "http" in name or "http" in product:
         return "http"
     return None
 
 
 def _build_target(host: Host, service: Service) -> str:
     scheme = _infer_scheme(service)
-    # Clean hostname/IP from any whitespace, %, and other unwanted characters
-    def clean_str(s: str) -> str:
-        """Remove all % characters and strip whitespace."""
-        return s.replace("%", "").strip()
-    
-    hostname_raw = (host.hostname or "").strip() or host.ip.strip()
-    hostname = clean_str(hostname_raw)
+      
+    hostname = (host.hostname or "").strip() or host.ip.strip()
     
     if scheme:
-        default_port = 80 if scheme == "http" else 443
-        if service.port == default_port:
-            return f"{scheme}://{hostname}"
         return f"{scheme}://{hostname}:{service.port}"
     return f"{hostname}:{service.port}"
 
@@ -59,8 +51,7 @@ def _collect_targets(pairs: Sequence[tuple[Host, Service]]) -> list[str]:
     targets: list[str] = []
     for host, service in pairs:
         target = _build_target(host, service)
-        # Clean target from any % characters and whitespace
-        target = target.replace("%", "").strip()
+        target = target.strip()
         if target and target not in seen:
             seen.add(target)
             targets.append(target)
@@ -110,8 +101,8 @@ def _generate_ai_summary(settings: Settings, tenant_name: str, findings: list[Nu
             {"role": "system", "content": "Ты эксперт по кибербезопасности и анализу уязвимостей."},
             {"role": "user", "content": prompt},
         ],
-        "temperature": 0.4,
-        "max_tokens": 1200,
+        "temperature": settings.ai_temperature,
+        "max_tokens": settings.ai_max_tokens,
     }
 
     try:
@@ -160,9 +151,9 @@ def run_nuclei_scan_for_scan(
         for host, service in pairs:
             # Clean IP and hostname directly from database objects
             if host.ip:
-                host.ip = host.ip.replace("%", "").strip()
+                host.ip = host.ip.strip()
             if host.hostname:
-                host.hostname = host.hostname.replace("%", "").strip()
+                host.hostname = host.hostname.strip()
             cleaned_pairs.append((host, service))
         
         targets = _collect_targets(cleaned_pairs)
@@ -200,69 +191,120 @@ def run_nuclei_scan_for_scan(
     report_path = output_dir / f"nuclei_{timestamp}.json"
     log_path = output_dir / f"nuclei_{timestamp}.log"
 
+    cleaned_targets = [t.strip() for t in targets if t.strip()]
+    total_targets = len(cleaned_targets)
+    if logger:
+        logger.info("Nuclei targets detected: %d", total_targets)
+
+    base_cmd = [settings.nuclei_path, "-silent"]
+    for tpl in templates:
+        base_cmd.extend(["-t", tpl])
+    if settings.nuclei_socks5_proxy and settings.nuclei_socks5_proxy.lower() not in {"none", "null", ""}:
+        base_cmd.extend(["-proxy", settings.nuclei_socks5_proxy])
+
+    all_records: list[NucleiFindingRecord] = []
+    all_json_lines: list[str] = []  # Collect original JSON lines for final report
+    log_entries: list[str] = []
+    successful_targets = 0
+    timeout_targets = 0
+    failed_targets = 0
+    overall_success = True
+
+    # Create temporary directory for per-target JSON files
     with tempfile.TemporaryDirectory() as tmpdir:
-        targets_file = Path(tmpdir) / "targets.txt"
-        # Filter empty targets and join with newlines
-        cleaned_targets = [t.strip() for t in targets if t.strip()]
-        targets_content = "\n".join(cleaned_targets)
+        tmp_path = Path(tmpdir)
         
-        if logger:
-            logger.debug("Writing %d targets to file", len(cleaned_targets))
-            if cleaned_targets:
-                logger.debug("Last target: %r", cleaned_targets[-1] if cleaned_targets else None)
-        
-        targets_file.write_text(targets_content, encoding="utf-8")
+        for idx, target in enumerate(cleaned_targets, start=1):
+            # Create temporary JSON file for this target
+            target_json_file = tmp_path / f"target_{idx}_{target.replace('/', '_').replace(':', '_')}.json"
+            
+            cmd = [*base_cmd, "-target", target, "-json-export", str(target_json_file)]
+            logger.info("Running Nuclei for target %s (%d/%d)", target, idx, total_targets)
+            logger.debug("Nuclei command: %s", " ".join(cmd))
 
-        cmd = [
-            settings.nuclei_path,
-            "-list",
-            str(targets_file),
-            "-json-export",
-            str(report_path),
-            "-silent",
-        ]
-        for tpl in templates:
-            cmd.extend(["-t", tpl])
-        if settings.nuclei_socks5_proxy and settings.nuclei_socks5_proxy.lower() not in {"none", "null", ""}:
-            cmd.extend(["-proxy", settings.nuclei_socks5_proxy])
-
-        logger.info("Nuclei command: %s", " ".join(cmd))
-        try:
-            proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=settings.nuclei_timeout_sec or None,
-            )
-            returncode = proc.returncode
-            stdout = proc.stdout
-            stderr = proc.stderr
-        except subprocess.TimeoutExpired as exc:
-            returncode = -1
-            # exc.stdout and exc.stderr may be bytes, decode them to strings
-            if exc.stdout is not None:
-                stdout = exc.stdout.decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else str(exc.stdout)
-            else:
-                stdout = ""
-            if exc.stderr is not None:
-                stderr = exc.stderr.decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else str(exc.stderr)
-                stderr += "\nTimeout expired"
-            else:
+            timed_out = False
+            stdout = ""
+            stderr = ""
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=settings.nuclei_timeout_sec or None,
+                )
+                returncode = proc.returncode
+                stdout = proc.stdout or ""
+                stderr = proc.stderr or ""
+            except subprocess.TimeoutExpired as exc:
+                returncode = -1
+                timed_out = True
+                if exc.stdout is not None:
+                    stdout = exc.stdout.decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else str(exc.stdout)
                 stderr = "Timeout expired"
+                if exc.stderr is not None:
+                    decoded = exc.stderr.decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else str(exc.stderr)
+                    stderr = f"{decoded}\nTimeout expired"
 
-    log_path.write_text(
-        f"CMD: {' '.join(cmd)}\nRETURN: {returncode}\n\nSTDOUT:\n{stdout}\n\nSTDERR:\n{stderr}",
-        encoding="utf-8",
-    )
+            # Read results from JSON file if command succeeded
+            target_records: list[NucleiFindingRecord] = []
+            target_json_lines: list[str] = []
+            if returncode == 0 and target_json_file.exists():
+                try:
+                    # Read original JSON lines from file
+                    json_content = target_json_file.read_text(encoding="utf-8", errors="replace").strip()
+                    if json_content:
+                        # Parse as JSONL (newline-delimited JSON)
+                        for line in json_content.splitlines():
+                            line = line.strip()
+                            if line:
+                                target_json_lines.append(line)
+                    
+                    # Also parse into records for processing
+                    target_records = load_nuclei_results(target_json_file)
+                    all_records.extend(target_records)
+                    all_json_lines.extend(target_json_lines)
+                    successful_targets += 1
+                    if logger:
+                        logger.info("Target %s: found %d findings", target, len(target_records))
+                except Exception as e:
+                    if logger:
+                        logger.error("Failed to parse results for target %s: %s", target, str(e))
+                    failed_targets += 1
+                    overall_success = False
+            else:
+                if timed_out:
+                    timeout_targets += 1
+                    if logger:
+                        logger.warning("Target %s: scan timed out", target)
+                else:
+                    failed_targets += 1
+                    overall_success = False
+                    if logger:
+                        logger.warning("Target %s: scan failed with return code %d", target, returncode)
 
-    records: list[NucleiFindingRecord] = []
-    if report_path.exists():
-        records = load_nuclei_results(report_path)
+            log_entries.append(
+                "TARGET: {target}\nCMD: {cmd}\nRETURN: {ret}\nFINDINGS: {findings}\n\nSTDOUT:\n{stdout}\n\nSTDERR:\n{stderr}\n\n".format(
+                    target=target,
+                    cmd=" ".join(cmd),
+                    ret=returncode,
+                    findings=len(target_records),
+                    stdout=stdout,
+                    stderr=stderr,
+                )
+            )
 
-    status = "done" if returncode == 0 else "failed"
+    # Write combined results to final report file (as JSONL)
+    if all_json_lines:
+        report_path.write_text("\n".join(all_json_lines) + "\n", encoding="utf-8")
+    else:
+        report_path.write_text("", encoding="utf-8")
+    
+    log_path.write_text("".join(log_entries), encoding="utf-8")
+
+    status = "done" if overall_success else "failed"
     summary: str | None = None
-    if status == "done":
-        summary = _generate_ai_summary(settings, tenant_name, records)
+    if status == "done" and all_records and settings.ai_enabled:
+        summary = _generate_ai_summary(settings, tenant_name, all_records)
 
     with get_session(engine) as session:
         nuclei_scan_db = session.get(NucleiScan, nuclei_scan_id)
@@ -283,7 +325,7 @@ def run_nuclei_scan_for_scan(
                 if host.hostname:
                     hosts[host.hostname] = host
 
-            for record in records:
+            for record in all_records:
                 host_obj = hosts.get(record.ip or "") or hosts.get(record.host or "")
                 references = "\n".join(record.references) if record.references else None
                 tags = ",".join(record.tags) if record.tags else None
@@ -304,10 +346,18 @@ def run_nuclei_scan_for_scan(
                 )
 
     logger.info(
+        "Nuclei runs summary: total=%d success=%d failed=%d timeout=%d",
+        total_targets,
+        successful_targets,
+        failed_targets,
+        timeout_targets,
+    )
+
+    logger.info(
         "Nuclei scan finished: tenant=%s scan_id=%s status=%s findings=%d report=%s",
         tenant_name,
         scan_id,
         status,
-        len(records),
+        len(all_records),
         str(report_path),
     )
