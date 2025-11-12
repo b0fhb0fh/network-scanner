@@ -1094,71 +1094,76 @@ def show_nuclei_cmd(  # type: ignore[override]
             }
         )
 
-        findings_table = Table(title="Nuclei Findings", width=CONSOLE_TABLE_WIDTH)
-        findings_table.add_column("Severity", style="bold")
-        findings_table.add_column("Target")
-        findings_table.add_column("Vulnerability")
-        findings_table.add_column("Name")
-        findings_table.add_column("Description")
-        findings_table.add_column("References")
+        findings_by_target: dict[str, list[NucleiFindingRecord]] = {}
+        for finding in findings:
+            findings_by_target.setdefault(finding.target or "-", []).append(finding)
 
-        findings_pdf_data = {
-            "title": "Nuclei Findings",
-            "columns": ["Severity", "Target", "Vulnerability", "Name", "Description", "References"],
-            "rows": [],
-        }
+        for target, target_findings in sorted(findings_by_target.items()):
+            findings_table = Table(title=f"Nuclei Findings for {target}", width=CONSOLE_TABLE_WIDTH)
+            findings_table.add_column("Severity", style="bold")
+            findings_table.add_column("Target")
+            findings_table.add_column("Vulnerability")
+            findings_table.add_column("Name")
+            findings_table.add_column("Description")
+            findings_table.add_column("References")
 
-        sorted_findings = sorted(
-            findings,
-            key=lambda f: (
-                severity_order.get((f.severity or "UNKNOWN").upper(), 99),
-                f.target,
-                f.template_id or "",
-            ),
-        )
+            findings_pdf_data = {
+                "title": f"Nuclei Findings for {target}",
+                "columns": ["Severity", "Target", "Vulnerability", "Name", "Description", "References"],
+                "rows": [],
+            }
 
-        for finding in sorted_findings:
-            severity = (finding.severity or "UNKNOWN").upper()
-            template_label = finding.template_id or "-"
-            if finding.template_name and finding.template_name != finding.template_id:
-                template_label = f"{finding.template_name} ({template_label})"
-            description = (finding.description or "").strip()
-            if len(description) > 200:
-                description = description[:197] + "..."
-            references = (finding.references or "").strip()
-            if references:
-                refs_lines = references.splitlines()
-                if len(refs_lines) > 3:
-                    references = "\n".join(refs_lines[:3]) + "\n..."
-            vulnerability = (finding.evidence or "").strip()
-            if not vulnerability:
-                tags_value = getattr(finding, "tags", None)
-                if tags_value:
-                    if isinstance(tags_value, str):
-                        vulnerability = tags_value.replace(",", ", ")
-                    else:
-                        vulnerability = ", ".join(tags_value)
-            if not vulnerability:
-                vulnerability = template_label or "-"
-            findings_table.add_row(
-                severity,
-                finding.target,
-                vulnerability,
-                finding.template_name or "-",
-                description or "-",
-                references or "-",
+            sorted_findings = sorted(
+                target_findings,
+                key=lambda f: (
+                    severity_order.get((f.severity or "UNKNOWN").upper(), 99),
+                    f.template_id or "",
+                ),
             )
-            findings_pdf_data["rows"].append([
-                severity,
-                finding.target,
-                vulnerability,
-                finding.template_name or "-",
-                description or "-",
-                references or "-",
-            ])
 
-        console.print(findings_table)
-        pdf_blocks.append(findings_pdf_data)
+            for finding in sorted_findings:
+                severity = (finding.severity or "UNKNOWN").upper()
+                template_label = finding.template_id or "-"
+                if finding.template_name and finding.template_name != finding.template_id:
+                    template_label = f"{finding.template_name} ({template_label})"
+                description = (finding.description or "").strip()
+                if len(description) > 200:
+                    description = description[:197] + "..."
+                references = (finding.references or "").strip()
+                if references:
+                    refs_lines = references.splitlines()
+                    if len(refs_lines) > 3:
+                        references = "\n".join(refs_lines[:3]) + "\n..."
+                vulnerability = (finding.evidence or "").strip()
+                if not vulnerability:
+                    tags_value = getattr(finding, "tags", None)
+                    if tags_value:
+                        if isinstance(tags_value, str):
+                            vulnerability = tags_value.replace(",", ", ")
+                        else:
+                            vulnerability = ", ".join(tags_value)
+                if not vulnerability:
+                    vulnerability = template_label or "-"
+
+                findings_table.add_row(
+                    severity,
+                    target,
+                    vulnerability,
+                    finding.template_name or "-",
+                    description or "-",
+                    references or "-",
+                )
+                findings_pdf_data["rows"].append([
+                    severity,
+                    target,
+                    vulnerability,
+                    finding.template_name or "-",
+                    description or "-",
+                    references or "-",
+                ])
+
+            console.print(findings_table)
+            pdf_blocks.append(findings_pdf_data)
     else:
         console.print("No findings recorded for this nuclei scan", style="green")
 
