@@ -1073,10 +1073,16 @@ def show_nuclei_cmd(  # type: ignore[override]
         findings_table = Table(title="Nuclei Findings", width=CONSOLE_TABLE_WIDTH)
         findings_table.add_column("Severity", style="bold")
         findings_table.add_column("Target")
-        findings_table.add_column("Template")
+        findings_table.add_column("Vulnerability")
         findings_table.add_column("Name")
         findings_table.add_column("Description")
         findings_table.add_column("References")
+
+        findings_pdf_data = {
+            "title": "Nuclei Findings",
+            "columns": ["Severity", "Target", "Vulnerability", "Name", "Description", "References"],
+            "rows": [],
+        }
 
         sorted_findings = sorted(
             findings,
@@ -1100,17 +1106,35 @@ def show_nuclei_cmd(  # type: ignore[override]
                 refs_lines = references.splitlines()
                 if len(refs_lines) > 3:
                     references = "\n".join(refs_lines[:3]) + "\n..."
+            vulnerability = (finding.evidence or "").strip()
+            if not vulnerability:
+                tags_value = getattr(finding, "tags", None)
+                if tags_value:
+                    if isinstance(tags_value, str):
+                        vulnerability = tags_value.replace(",", ", ")
+                    else:
+                        vulnerability = ", ".join(tags_value)
+            if not vulnerability:
+                vulnerability = template_label or "-"
             findings_table.add_row(
                 severity,
                 finding.target,
-                template_label,
+                vulnerability,
                 finding.template_name or "-",
                 description or "-",
                 references or "-",
             )
+            findings_pdf_data["rows"].append([
+                severity,
+                finding.target,
+                vulnerability,
+                finding.template_name or "-",
+                description or "-",
+                references or "-",
+            ])
 
         console.print(findings_table)
-        pdf_blocks.append(_table_to_data(findings_table))
+        pdf_blocks.append(findings_pdf_data)
     else:
         console.print("No findings recorded for this nuclei scan", style="green")
 
