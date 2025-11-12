@@ -27,6 +27,8 @@ class Settings:
     ai_api_key: Optional[str] = None
     ai_model: str = "gpt-4o-mini"
     ai_enabled: bool = False
+    ai_temperature: float = 0.4
+    ai_max_tokens: int = 1200
 
     @staticmethod
     def load(config_path: Optional[str] = None) -> "Settings":
@@ -149,6 +151,20 @@ class Settings:
             if ai_enabled_val is not None:
                 settings.ai_enabled = ai_enabled_val.strip().lower() in {"1", "true", "yes"}  # type: ignore[assignment]
 
+            ai_temperature_val = cfg_get("AI_TEMPERATURE", "ai_temperature")
+            if ai_temperature_val is not None:
+                try:
+                    settings.ai_temperature = float(ai_temperature_val)
+                except ValueError:
+                    pass
+
+            ai_max_tokens_val = cfg_get("AI_MAX_TOKENS", "ai_max_tokens")
+            if ai_max_tokens_val is not None:
+                try:
+                    settings.ai_max_tokens = int(ai_max_tokens_val)
+                except ValueError:
+                    pass
+
         # 3) Override from environment variables if present
         env_overrides = {
             "sqlite_path": os.environ.get("NETWORK_SCANNER_DB") or os.environ.get("SQLITE_PATH"),
@@ -181,6 +197,8 @@ class Settings:
             "ai_api_key": os.environ.get("AI_API_KEY"),
             "ai_model": os.environ.get("AI_MODEL"),
             "ai_enabled": os.environ.get("AI_ENABLED"),
+            "ai_temperature": os.environ.get("AI_TEMPERATURE"),
+            "ai_max_tokens": os.environ.get("AI_MAX_TOKENS"),
         }
         if env_overrides["sqlite_path"]:
             settings.sqlite_path = Path(str(env_overrides["sqlite_path"]))  # type: ignore[assignment]
@@ -232,6 +250,16 @@ class Settings:
             settings.ai_model = str(env_overrides["ai_model"])  # type: ignore[assignment]
         if env_overrides["ai_enabled"]:
             settings.ai_enabled = str(env_overrides["ai_enabled"]).lower() in {"1", "true", "yes"}  # type: ignore[assignment]
+        if env_overrides["ai_temperature"]:
+            try:
+                settings.ai_temperature = float(str(env_overrides["ai_temperature"]))
+            except ValueError:
+                pass
+        if env_overrides["ai_max_tokens"]:
+            try:
+                settings.ai_max_tokens = int(str(env_overrides["ai_max_tokens"]))
+            except ValueError:
+                pass
 
         settings.data_dir.mkdir(parents=True, exist_ok=True)
         return settings

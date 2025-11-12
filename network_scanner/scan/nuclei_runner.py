@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import subprocess
-import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Sequence
@@ -101,8 +100,8 @@ def _generate_ai_summary(settings: Settings, tenant_name: str, findings: list[Nu
             {"role": "system", "content": "Ты эксперт по кибербезопасности и анализу уязвимостей."},
             {"role": "user", "content": prompt},
         ],
-        "temperature": 0.4,
-        "max_tokens": 1200,
+        "temperature": settings.ai_temperature,
+        "max_tokens": settings.ai_max_tokens,
     }
 
     try:
@@ -191,33 +190,30 @@ def run_nuclei_scan_for_scan(
     report_path = output_dir / f"nuclei_{timestamp}.json"
     log_path = output_dir / f"nuclei_{timestamp}.log"
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        targets_file = Path(tmpdir) / "targets.txt"
-        # Filter empty targets and join with newlines
-        cleaned_targets = [t.strip() for t in targets if t.strip()]
-        targets_content = "\n".join(cleaned_targets)
-        
-        if logger:
-            logger.debug("Writing %d targets to file", len(cleaned_targets))
-            if cleaned_targets:
-                logger.debug("Last target: %r", cleaned_targets[-1] if cleaned_targets else None)
-        
-        targets_file.write_text(targets_content, encoding="utf-8")
+    cleaned_targets = [t.strip() for t in targets if t.strip()]
+    total_targets = len(cleaned_targets)
+    if logger:
+        logger.info("Nuclei targets detected: %d", total_targets)
 
-        cmd = [
-            settings.nuclei_path,
-            "-list",
-            str(targets_file),
-            "-json-export",
-            str(report_path),
-            "-silent",
-        ]
-        for tpl in templates:
-            cmd.extend(["-t", tpl])
-        if settings.nuclei_socks5_proxy and settings.nuclei_socks5_proxy.lower() not in {"none", "null", ""}:
-            cmd.extend(["-proxy", settings.nuclei_socks5_proxy])
+    base_cmd = [settings.nuclei_path, "-silent", "-jsonl"]
+    for tpl in templates:
+        base_cmd.extend(["-t", tpl])
+    if settings.nuclei_socks5_proxy and settings.nuclei_socks5_proxy.lower() not in {"none", "null", ""}:
+        base_cmd.extend(["-proxy", settings.nuclei_socks5_proxy])
 
-        logger.info("Nuclei command: %s", " ".join(cmd))
+    all_json_lines: list[str] = []
+    log_entries: list[str] = []
+    successful_targets = 0
+    timeout_targets = 0
+    failed_targets = 0
+    overall_success = True
+
+    for idx, target in enumerate(cleaned_targets, start=1):
+        cmd = [*base_cmd, "-target", target]
+        logger.info("Running Nuclei for target %s (%d/%d)", target, idx, total_targets)
+        logger.debug("Nuclei command: %s", " ".join(cmd))
+
+        timed_out = False
         try:
             proc = subprocess.run(
                 cmd,
@@ -226,31 +222,48 @@ def run_nuclei_scan_for_scan(
                 timeout=settings.nuclei_timeout_sec or None,
             )
             returncode = proc.returncode
-            stdout = proc.stdout
-            stderr = proc.stderr
+            stdout = proc.stdout or ""
+            stderr = proc.stderr or ""
         except subprocess.TimeoutExpired as exc:
             returncode = -1
-            # exc.stdout and exc.stderr may be bytes, decode them to strings
+            stdout = ""
+            timed_out = True
             if exc.stdout is not None:
                 stdout = exc.stdout.decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else str(exc.stdout)
-            else:
-                stdout = ""
+            stderr = "Timeout expired"
             if exc.stderr is not None:
-                stderr = exc.stderr.decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else str(exc.stderr)
-                stderr += "\nTimeout expired"
-            else:
-                stderr = "Timeout expired"
+                decoded = exc.stderr.decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else str(exc.stderr)
+                stderr = f"{decoded}\nTimeout expired"
 
-    log_path.write_text(
-        f"CMD: {' '.join(cmd)}\nRETURN: {returncode}\n\nSTDOUT:\n{stdout}\n\nSTDERR:\n{stderr}",
-        encoding="utf-8",
-    )
+        if returncode == 0:
+            successful_targets += 1
+            json_lines = [line.strip() for line in stdout.splitlines() if line.strip()]
+            all_json_lines.extend(json_lines)
+        else:
+            if timed_out:
+                timeout_targets += 1
+            else:
+                failed_targets += 1
+                overall_success = False
+
+        log_entries.append(
+            "TARGET: {target}\nCMD: {cmd}\nRETURN: {ret}\n\nSTDOUT:\n{stdout}\n\nSTDERR:\n{stderr}\n\n".format(
+                target=target,
+                cmd=" ".join(cmd),
+                ret=returncode,
+                stdout=stdout,
+                stderr=stderr,
+            )
+        )
+
+    report_path.write_text("\n".join(all_json_lines) + ("\n" if all_json_lines else ""), encoding="utf-8")
+    log_path.write_text("".join(log_entries), encoding="utf-8")
 
     records: list[NucleiFindingRecord] = []
     if report_path.exists():
         records = load_nuclei_results(report_path)
 
-    status = "done" if returncode == 0 else "failed"
+    status = "done" if overall_success else "failed"
     summary: str | None = None
     if status == "done":
         summary = _generate_ai_summary(settings, tenant_name, records)
@@ -293,6 +306,14 @@ def run_nuclei_scan_for_scan(
                     matched_url=record.matched_url,
                     matched_at=record.matched_at,
                 )
+
+    logger.info(
+        "Nuclei runs summary: total=%d success=%d failed=%d timeout=%d",
+        total_targets,
+        successful_targets,
+        failed_targets,
+        timeout_targets,
+    )
 
     logger.info(
         "Nuclei scan finished: tenant=%s scan_id=%s status=%s findings=%d report=%s",
