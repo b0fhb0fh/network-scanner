@@ -75,7 +75,7 @@ def _table_to_data(table: Table) -> dict:
     rich_rows = getattr(table, "rows", None) or getattr(table, "_rows", None)
     if rich_rows:
         for row in rich_rows:
-            row_cells = getattr(row, "cells", None)
+            row_cells = getattr(row, "cells", None) or getattr(row, "_cells", None)
             if row_cells is None:
                 continue
             cells = [_extract_cell_text(cell) for cell in row_cells]
@@ -101,6 +101,7 @@ def _table_to_data(table: Table) -> dict:
         # Find data rows (lines with │ or ┃ separators)
         header_found = False
         current_row = None
+        pending_row = None
         for line in lines:
             line = line.strip()
             # Skip empty lines and border lines
@@ -129,6 +130,15 @@ def _table_to_data(table: Table) -> dict:
                     header_found = True
                     continue
                 
+                # Some rows may be wrapped across multiple lines; detect continuation
+                if pending_row and cells:
+                    # If the number of non-empty cells is smaller than columns and the first cells are empty,
+                    # treat as continuation of previous row (append to last cell)
+                    non_empty = [c for c in cells if c]
+                    if len(non_empty) == 1 and (not cells[0] or cells[0] == ""):
+                        pending_row[-1] = (pending_row[-1] + " " + non_empty[0]).strip()
+                        continue
+
                 # New row
                 if cells:
                     # Pad or truncate to match column count
@@ -137,6 +147,7 @@ def _table_to_data(table: Table) -> dict:
                     elif len(cells) > len(data["columns"]):
                         cells = cells[:len(data["columns"])]
                     rows_data.append(cells)
+                    pending_row = cells
     
     data["rows"] = rows_data
     return data
