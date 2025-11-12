@@ -41,11 +41,16 @@ def parse_nmap_xml_into_db(engine: Engine, xml_path: Path, scan_id: int, setting
 
             addr_elem = host.find("address")
             ip = _get_text(addr_elem, "addr")
+            # Clean IP from any unwanted characters like %
+            ip = ip.replace("%", "").strip()
+            
             hostnames_elem = host.find("hostnames")
             hostname = ""
             if hostnames_elem is not None:
                 hn = hostnames_elem.find("hostname")
                 hostname = _get_text(hn, "name")
+                # Clean hostname from any unwanted characters like %
+                hostname = hostname.replace("%", "").strip()
 
             h = Host(scan_id=scan_id, ip=ip, hostname=hostname or None)
             s.add(h)

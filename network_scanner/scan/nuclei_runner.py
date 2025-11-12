@@ -39,7 +39,13 @@ def _infer_scheme(service: Service) -> str | None:
 def _build_target(host: Host, service: Service) -> str:
     scheme = _infer_scheme(service)
     # Clean hostname/IP from any whitespace, %, and other unwanted characters
-    hostname = (host.hostname or "").strip().rstrip("%").strip() or host.ip.strip().rstrip("%").strip()
+    def clean_str(s: str) -> str:
+        """Remove all % characters and strip whitespace."""
+        return s.replace("%", "").strip()
+    
+    hostname_raw = (host.hostname or "").strip() or host.ip.strip()
+    hostname = clean_str(hostname_raw)
+    
     if scheme:
         default_port = 80 if scheme == "http" else 443
         if service.port == default_port:
@@ -53,8 +59,8 @@ def _collect_targets(pairs: Sequence[tuple[Host, Service]]) -> list[str]:
     targets: list[str] = []
     for host, service in pairs:
         target = _build_target(host, service)
-        # Clean target from any trailing whitespace or unwanted characters
-        target = target.strip().rstrip("%").strip()
+        # Clean target from any % characters and whitespace
+        target = target.replace("%", "").strip()
         if target and target not in seen:
             seen.add(target)
             targets.append(target)
@@ -148,7 +154,24 @@ def run_nuclei_scan_for_scan(
             .where(Host.scan_id == scan_id)
         )
         pairs = [(row[0], row[1]) for row in result]
-        targets = _collect_targets(pairs)
+        
+        # Clean host data before processing - remove % from IP and hostname
+        cleaned_pairs = []
+        for host, service in pairs:
+            # Clean IP and hostname directly from database objects
+            if host.ip:
+                host.ip = host.ip.replace("%", "").strip()
+            if host.hostname:
+                host.hostname = host.hostname.replace("%", "").strip()
+            cleaned_pairs.append((host, service))
+        
+        targets = _collect_targets(cleaned_pairs)
+        
+        # Log targets for debugging
+        if logger:
+            logger.debug("Collected %d targets for nuclei scan", len(targets))
+            if targets:
+                logger.debug("First few targets: %s", targets[:3])
 
         nuclei_scan = create_nuclei_scan(
             session,
@@ -179,8 +202,15 @@ def run_nuclei_scan_for_scan(
 
     with tempfile.TemporaryDirectory() as tmpdir:
         targets_file = Path(tmpdir) / "targets.txt"
-        # Join targets with newlines, ensuring no trailing newline or unwanted characters
-        targets_content = "\n".join(targets).strip()
+        # Filter empty targets and join with newlines
+        cleaned_targets = [t.strip() for t in targets if t.strip()]
+        targets_content = "\n".join(cleaned_targets)
+        
+        if logger:
+            logger.debug("Writing %d targets to file", len(cleaned_targets))
+            if cleaned_targets:
+                logger.debug("Last target: %r", cleaned_targets[-1] if cleaned_targets else None)
+        
         targets_file.write_text(targets_content, encoding="utf-8")
 
         cmd = [
@@ -209,8 +239,16 @@ def run_nuclei_scan_for_scan(
             stderr = proc.stderr
         except subprocess.TimeoutExpired as exc:
             returncode = -1
-            stdout = exc.stdout or ""
-            stderr = (exc.stderr or "") + "\nTimeout expired"
+            # exc.stdout and exc.stderr may be bytes, decode them to strings
+            if exc.stdout is not None:
+                stdout = exc.stdout.decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else str(exc.stdout)
+            else:
+                stdout = ""
+            if exc.stderr is not None:
+                stderr = exc.stderr.decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else str(exc.stderr)
+                stderr += "\nTimeout expired"
+            else:
+                stderr = "Timeout expired"
 
     log_path.write_text(
         f"CMD: {' '.join(cmd)}\nRETURN: {returncode}\n\nSTDOUT:\n{stdout}\n\nSTDERR:\n{stderr}",

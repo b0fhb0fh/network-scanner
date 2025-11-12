@@ -333,6 +333,44 @@ def add_nuclei_finding(
     matched_url: str | None,
     matched_at: datetime | None = None,
 ) -> NucleiFinding:
+    # Check if finding already exists (based on unique constraint)
+    # Handle None values properly in the query
+    query = select(NucleiFinding).where(
+        NucleiFinding.nuclei_scan_id == nuclei_scan.id,
+        NucleiFinding.target == target,
+    )
+    if template_id is not None:
+        query = query.where(NucleiFinding.template_id == template_id)
+    else:
+        query = query.where(NucleiFinding.template_id.is_(None))
+    
+    if matched_url is not None:
+        query = query.where(NucleiFinding.matched_url == matched_url)
+    else:
+        query = query.where(NucleiFinding.matched_url.is_(None))
+    
+    existing = session.scalar(query)
+    
+    if existing:
+        # Update existing finding with new data
+        if template_name:
+            existing.template_name = template_name
+        if severity:
+            existing.severity = severity
+        if description:
+            existing.description = description
+        if evidence:
+            existing.evidence = evidence
+        if references:
+            existing.references = references
+        if tags:
+            existing.tags = tags
+        if host:
+            existing.host_id = host.id
+        session.flush()
+        return existing
+    
+    # Create new finding
     finding = NucleiFinding(
         nuclei_scan_id=nuclei_scan.id,
         host_id=host.id if host else None,
