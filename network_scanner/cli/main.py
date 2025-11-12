@@ -70,71 +70,84 @@ def _table_to_data(table: Table) -> dict:
             header = header.plain
         data["columns"].append(str(header) if header else "")
     
-    # Extract rows - Rich Table doesn't expose cells directly
-    # So we render the table and parse the output
+    # Extract rows directly from Table._rows if available
     rows_data = []
-    
-    # Render table to text and parse it
-    from rich.console import Console as RichConsole
-    from io import StringIO
-    output = StringIO()
-    console = RichConsole(file=output, width=120, record=True, force_terminal=False)
-    console.print(table)
-    rendered = console.export_text(clear=False)
-    
-    # Parse rendered text to extract rows
-    lines = rendered.splitlines()
-    # Find data rows (lines with │ or ┃ separators)
-    # Skip header row - it's the first data row after borders
-    header_found = False
-    for line in lines:
-        original_line = line
-        line = line.strip()
-        # Skip empty lines and border lines
-        if not line:
-            continue
-        # Skip border lines (lines that are only border characters)
-        if all(c in '┏┓┗┛┃│┡┢┣┫┪┴┼╇╈╉╊╋┳┻║═╔╗╚╝╠╣╦╩╬━─├┤┬┴┼' for c in line):
-            continue
-        
-        # Check if this is a data row (contains │ or ┃)
-        if '│' in line or '┃' in line:
-            # Split by │ or ┃ and clean up
-            if '│' in line:
-                # Split by │ and keep all parts
-                parts = line.split('│')
-                # Remove leading/trailing empty parts (borders)
-                while parts and not parts[0].strip():
-                    parts.pop(0)
-                while parts and not parts[-1].strip():
-                    parts.pop()
-                cells = [c.strip() for c in parts]
-            else:
-                # Split by ┃ and keep all parts
-                parts = line.split('┃')
-                # Remove leading/trailing empty parts (borders)
-                while parts and not parts[0].strip():
-                    parts.pop(0)
-                while parts and not parts[-1].strip():
-                    parts.pop()
-                cells = [c.strip() for c in parts]
-            
-            # Skip header row - check if cells match column headers
-            if not header_found:
-                # This is likely the header row, skip it
-                header_found = True
-                continue
-            
-            # Add row if we have any cells (even if some are empty)
+    if hasattr(table, '_rows') and table._rows:
+        for row in table._rows:
+            cells = []
+            for cell in row.cells:
+                cell_text = _extract_cell_text(cell)
+                cells.append(cell_text)
             if cells:
                 # Pad or truncate to match column count
                 if len(cells) < len(data["columns"]):
-                    # Pad with empty strings
                     cells.extend([""] * (len(data["columns"]) - len(cells)))
                 elif len(cells) > len(data["columns"]):
-                    # Truncate to match column count
                     cells = cells[:len(data["columns"])]
                 rows_data.append(cells)
+    else:
+        # Fallback: render table and parse it (but handle multi-line cells better)
+        from rich.console import Console as RichConsole
+        from io import StringIO
+        output = StringIO()
+        console = RichConsole(file=output, width=120, record=True, force_terminal=False)
+        console.print(table)
+        rendered = console.export_text(clear=False)
+        
+        # Parse rendered text to extract rows
+        lines = rendered.splitlines()
+        # Find data rows (lines with │ or ┃ separators)
+        header_found = False
+        current_row = None
+        for line in lines:
+            line = line.strip()
+            # Skip empty lines and border lines
+            if not line:
+                continue
+            # Skip border lines (lines that are only border characters)
+            if all(c in '┏┓┗┛┃│┡┢┣┫┪┴┼╇╈╉╊╋┳┻║═╔╗╚╝╠╣╦╩╬━─├┤┬┴┼' for c in line):
+                continue
+            
+            # Check if this is a data row (contains │ or ┃)
+            if '│' in line or '┃' in line:
+                # Split by │ or ┃ and clean up
+                if '│' in line:
+                    parts = line.split('│')
+                else:
+                    parts = line.split('┃')
+                # Remove leading/trailing empty parts (borders)
+                while parts and not parts[0].strip():
+                    parts.pop(0)
+                while parts and not parts[-1].strip():
+                    parts.pop()
+                cells = [c.strip() for c in parts]
+                
+                # Skip header row
+                if not header_found:
+                    header_found = True
+                    continue
+                
+                # Check if this is a continuation of previous row (first few cells are empty)
+                # This happens when text wraps in a cell
+                if current_row and cells and len(cells) > 0:
+                    # Check if first non-empty cell index suggests continuation
+                    first_non_empty_idx = next((i for i, c in enumerate(cells) if c), None)
+                    if first_non_empty_idx is not None and first_non_empty_idx > 0:
+                        # This might be a continuation - append to last cell of current row
+                        if first_non_empty_idx < len(current_row):
+                            # Append text to the last cell
+                            current_row[-1] = (current_row[-1] + " " + " ".join(c for c in cells if c)).strip()
+                            continue
+                
+                # New row
+                if cells:
+                    # Pad or truncate to match column count
+                    if len(cells) < len(data["columns"]):
+                        cells.extend([""] * (len(data["columns"]) - len(cells)))
+                    elif len(cells) > len(data["columns"]):
+                        cells = cells[:len(data["columns"])]
+                    current_row = cells
+                    rows_data.append(cells)
     
     data["rows"] = rows_data
     return data
