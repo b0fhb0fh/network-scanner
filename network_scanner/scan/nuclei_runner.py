@@ -29,27 +29,19 @@ def _infer_scheme(service: Service) -> str | None:
     port = service.port
     name = (service.name or "").lower()
     product = (service.product or "").lower()
-    if port in {443, 8443, 9443, 10443, 4443} or "https" in name or "https" in product or "ssl" in name or "tls" in name:
+    if "https" in name or "https" in product:
         return "https"
-    if port in {80, 8080, 8000, 8888, 8081, 81} or "http" in name or "http" in product:
+    if "http" in name or "http" in product:
         return "http"
     return None
 
 
 def _build_target(host: Host, service: Service) -> str:
     scheme = _infer_scheme(service)
-    # Clean hostname/IP from any whitespace, %, and other unwanted characters
-    def clean_str(s: str) -> str:
-        """Remove all % characters and strip whitespace."""
-        return s.replace("%", "").strip()
-    
-    hostname_raw = (host.hostname or "").strip() or host.ip.strip()
-    hostname = clean_str(hostname_raw)
+      
+    hostname = (host.hostname or "").strip() or host.ip.strip()
     
     if scheme:
-        default_port = 80 if scheme == "http" else 443
-        if service.port == default_port:
-            return f"{scheme}://{hostname}"
         return f"{scheme}://{hostname}:{service.port}"
     return f"{hostname}:{service.port}"
 
@@ -59,8 +51,7 @@ def _collect_targets(pairs: Sequence[tuple[Host, Service]]) -> list[str]:
     targets: list[str] = []
     for host, service in pairs:
         target = _build_target(host, service)
-        # Clean target from any % characters and whitespace
-        target = target.replace("%", "").strip()
+        target = target.strip()
         if target and target not in seen:
             seen.add(target)
             targets.append(target)
@@ -160,9 +151,9 @@ def run_nuclei_scan_for_scan(
         for host, service in pairs:
             # Clean IP and hostname directly from database objects
             if host.ip:
-                host.ip = host.ip.replace("%", "").strip()
+                host.ip = host.ip.strip()
             if host.hostname:
-                host.hostname = host.hostname.replace("%", "").strip()
+                host.hostname = host.hostname.strip()
             cleaned_pairs.append((host, service))
         
         targets = _collect_targets(cleaned_pairs)
