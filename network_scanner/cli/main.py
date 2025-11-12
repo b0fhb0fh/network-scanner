@@ -1039,24 +1039,40 @@ def show_nuclei_cmd(  # type: ignore[override]
     meta_table = Table(title=f"Nuclei Scan for {tenant}", width=CONSOLE_TABLE_WIDTH)
     meta_table.add_column("Property")
     meta_table.add_column("Value")
-    meta_table.add_row("Nuclei Scan ID", str(nuclei_scan.id))
-    meta_table.add_row("Base Scan ID", str(nuclei_scan.scan_id) if nuclei_scan.scan_id else "N/A")
-    meta_table.add_row("Status", nuclei_scan.status)
-    meta_table.add_row("Started", _fmt_dt(nuclei_scan.started_at))
-    meta_table.add_row("Finished", _fmt_dt(nuclei_scan.finished_at))
-    meta_table.add_row("Templates", nuclei_scan.templates or "-")
-    meta_table.add_row("Targets", str(nuclei_scan.target_count))
-    meta_table.add_row("Findings", str(len(findings)))
-    meta_table.add_row("Report Path", nuclei_scan.report_path or "-")
+    meta_rows = [
+        ("Nuclei Scan ID", str(nuclei_scan.id)),
+        ("Base Scan ID", str(nuclei_scan.scan_id) if nuclei_scan.scan_id else "N/A"),
+        ("Status", nuclei_scan.status),
+        ("Started", _fmt_dt(nuclei_scan.started_at)),
+        ("Finished", _fmt_dt(nuclei_scan.finished_at)),
+        ("Templates", nuclei_scan.templates or "-"),
+        ("Targets", str(nuclei_scan.target_count)),
+        ("Findings", str(len(findings))),
+        ("Report Path", nuclei_scan.report_path or "-"),
+    ]
+    for prop, value in meta_rows:
+        meta_table.add_row(prop, value)
     console.print(meta_table)
-    pdf_blocks.append(_table_to_data(meta_table))
+    pdf_blocks.append(
+        {
+            "title": f"Nuclei Scan for {tenant}",
+            "columns": ["Property", "Value"],
+            "rows": [[prop, value] for prop, value in meta_rows],
+        }
+    )
 
     if nuclei_scan.ai_summary:
         console.print(Panel(nuclei_scan.ai_summary, title="AI Summary", expand=False))
         summary_table = Table(title="AI Summary", width=CONSOLE_TABLE_WIDTH)
         summary_table.add_column("Summary")
         summary_table.add_row(nuclei_scan.ai_summary)
-        pdf_blocks.append(_table_to_data(summary_table))
+        pdf_blocks.append(
+            {
+                "title": "AI Summary",
+                "columns": ["Summary"],
+                "rows": [[nuclei_scan.ai_summary]],
+            }
+        )
 
     severity_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4, "UNKNOWN": 5}
 
@@ -1065,10 +1081,18 @@ def show_nuclei_cmd(  # type: ignore[override]
         breakdown_table = Table(title="Findings by Severity", width=CONSOLE_TABLE_WIDTH)
         breakdown_table.add_column("Severity")
         breakdown_table.add_column("Count")
+        breakdown_rows = []
         for severity, count in sorted(severity_counter.items(), key=lambda item: severity_order.get(item[0], 99)):
             breakdown_table.add_row(severity, str(count))
+            breakdown_rows.append([severity, str(count)])
         console.print(breakdown_table)
-        pdf_blocks.append(_table_to_data(breakdown_table))
+        pdf_blocks.append(
+            {
+                "title": "Findings by Severity",
+                "columns": ["Severity", "Count"],
+                "rows": breakdown_rows,
+            }
+        )
 
         findings_table = Table(title="Nuclei Findings", width=CONSOLE_TABLE_WIDTH)
         findings_table.add_column("Severity", style="bold")
