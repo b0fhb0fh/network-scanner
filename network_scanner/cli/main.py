@@ -70,21 +70,23 @@ def _table_to_data(table: Table) -> dict:
             header = header.plain
         data["columns"].append(str(header) if header else "")
     
-    # Extract rows directly from Table._rows if available
+    # Extract rows directly from Rich table structure when available
     rows_data = []
-    if hasattr(table, '_rows') and table._rows:
-        for row in table._rows:
-            cells = []
-            for cell in row.cells:
-                cell_text = _extract_cell_text(cell)
-                cells.append(cell_text)
-            if cells:
-                # Pad or truncate to match column count
-                if len(cells) < len(data["columns"]):
-                    cells.extend([""] * (len(data["columns"]) - len(cells)))
-                elif len(cells) > len(data["columns"]):
-                    cells = cells[:len(data["columns"])]
-                rows_data.append(cells)
+    rich_rows = getattr(table, "rows", None) or getattr(table, "_rows", None)
+    if rich_rows:
+        for row in rich_rows:
+            row_cells = getattr(row, "cells", None)
+            if row_cells is None:
+                continue
+            cells = [_extract_cell_text(cell) for cell in row_cells]
+            if not cells:
+                continue
+            # Pad or truncate to match column count
+            if len(cells) < len(data["columns"]):
+                cells.extend([""] * (len(data["columns"]) - len(cells)))
+            elif len(cells) > len(data["columns"]):
+                cells = cells[:len(data["columns"])]
+            rows_data.append(cells)
     else:
         # Fallback: render table and parse it (but handle multi-line cells better)
         from rich.console import Console as RichConsole
@@ -127,18 +129,6 @@ def _table_to_data(table: Table) -> dict:
                     header_found = True
                     continue
                 
-                # Check if this is a continuation of previous row (first few cells are empty)
-                # This happens when text wraps in a cell
-                if current_row and cells and len(cells) > 0:
-                    # Check if first non-empty cell index suggests continuation
-                    first_non_empty_idx = next((i for i, c in enumerate(cells) if c), None)
-                    if first_non_empty_idx is not None and first_non_empty_idx > 0:
-                        # This might be a continuation - append to last cell of current row
-                        if first_non_empty_idx < len(current_row):
-                            # Append text to the last cell
-                            current_row[-1] = (current_row[-1] + " " + " ".join(c for c in cells if c)).strip()
-                            continue
-                
                 # New row
                 if cells:
                     # Pad or truncate to match column count
@@ -146,7 +136,6 @@ def _table_to_data(table: Table) -> dict:
                         cells.extend([""] * (len(data["columns"]) - len(cells)))
                     elif len(cells) > len(data["columns"]):
                         cells = cells[:len(data["columns"])]
-                    current_row = cells
                     rows_data.append(cells)
     
     data["rows"] = rows_data
