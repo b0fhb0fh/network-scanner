@@ -43,10 +43,12 @@ from network_scanner.db.dao import (
     list_nuclei_scans,
     get_nuclei_scan_by_id,
     list_nuclei_findings,
+    update_nuclei_scan,
     delete_nuclei_scan,
 )
 from network_scanner.db.models import Scan, Host, Service, Vulnerability, NucleiScan, NucleiFinding
-from network_scanner.scan.nuclei_runner import run_nuclei_scan_for_scan
+from network_scanner.scan.nuclei_runner import run_nuclei_scan_for_scan, _generate_ai_summary
+from network_scanner.parsers.nuclei_json import NucleiFindingRecord
 from sqlalchemy import select, desc
 
 
@@ -193,7 +195,124 @@ def _build_pdf_path(settings: Settings, tenant_name: str, report_type: str, scan
     return base_dir / filename
 
 
-def _add_pdf_table(pdf, table_data: dict, col_widths: list[float] | None = None, center_table: bool = False):
+def _encode_text_for_pdf(text: str) -> str:
+    """Encode text for PDF output, handling UTF-8 characters properly.
+    
+    Returns text as-is - Unicode fonts will handle encoding.
+    """
+    return text
+
+
+def _parse_markdown_table(table_lines: list[str]) -> dict | None:
+    """Parse markdown table from lines and return table data structure.
+    
+    Returns None if no table found, or dict with 'columns' and 'rows' keys.
+    """
+    if not table_lines:
+        return None
+    
+    # Extract header (first line)
+    header_line = table_lines[0].strip()
+    if not header_line.startswith('|'):
+        return None
+    
+    columns = [col.strip() for col in header_line.split('|')[1:-1]]
+    if not columns:
+        return None
+    
+    # Find separator line and data rows
+    rows = []
+    data_start = 1
+    
+    # Skip separator line if present
+    if len(table_lines) > 1 and '---' in table_lines[1]:
+        data_start = 2
+    
+    # Extract data rows
+    for i in range(data_start, len(table_lines)):
+        line = table_lines[i].strip()
+        if not line.startswith('|'):
+            break
+        cells = [cell.strip() for cell in line.split('|')[1:-1]]
+        if len(cells) == len(columns):
+            rows.append(cells)
+    
+    if not rows:
+        return None
+    
+    return {
+        "columns": columns,
+        "rows": rows,
+    }
+
+
+def _split_ai_summary_into_blocks(ai_summary: str) -> list[dict]:
+    """Split AI summary into text blocks and tables.
+    
+    Returns list of blocks, where each block is either:
+    - {"type": "text", "content": str} for text paragraphs
+    - {"type": "table", "columns": list, "rows": list} for tables
+    """
+    blocks = []
+    
+    # Try to find markdown tables
+    lines = ai_summary.split('\n')
+    current_text = []
+    i = 0
+    
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+        
+        # Check if this line starts a markdown table (starts with | and contains table-like content)
+        if stripped.startswith('|') and len(stripped) > 1:
+            # Save current text block if any
+            if current_text:
+                text_content = '\n'.join(current_text).strip()
+                if text_content:
+                    blocks.append({"type": "text", "content": text_content})
+                current_text = []
+            
+            # Collect table lines
+            table_lines = [line]
+            i += 1
+            
+            # Skip separator line if present (|---|---|---|)
+            if i < len(lines) and ('---' in lines[i] or '|' in lines[i]):
+                if '---' in lines[i] or all(c in '-|: ' for c in lines[i].strip()):
+                    table_lines.append(lines[i])
+                    i += 1
+            
+            # Collect table data rows
+            while i < len(lines):
+                next_line = lines[i].strip()
+                if next_line.startswith('|') and len(next_line) > 1:
+                    table_lines.append(lines[i])
+                    i += 1
+                else:
+                    break
+            
+            # Parse table
+            table_data = _parse_markdown_table(table_lines)
+            if table_data:
+                blocks.append({"type": "table", **table_data})
+            else:
+                # If parsing failed, add as text
+                current_text.extend(table_lines)
+        else:
+            current_text.append(line)
+            i += 1
+    
+    # Add remaining text
+    if current_text:
+        text_content = '\n'.join(current_text).strip()
+        if text_content:
+            blocks.append({"type": "text", "content": text_content})
+    
+    return blocks
+
+
+def _add_pdf_table(pdf, table_data: dict, col_widths: list[float] | None = None, center_table: bool = False, font_name: str = "helvetica"):
     """Add a table to PDF using fpdf2 table capabilities."""
     if not table_data:
         return
@@ -206,39 +325,42 @@ def _add_pdf_table(pdf, table_data: dict, col_widths: list[float] | None = None,
     num_cols = len(table_data["columns"])
     if col_widths is None:
         page_width = pdf.w - 2 * pdf.l_margin
-        col_width = page_width / num_cols if num_cols > 0 else page_width
-        col_widths = [col_width] * num_cols
+        # For single column tables (like AI Summary), use full width minus margins
+        if num_cols == 1:
+            col_widths = [page_width]
+        else:
+            col_width = page_width / num_cols if num_cols > 0 else page_width
+            col_widths = [col_width] * num_cols
     
     # Calculate total table width
     total_table_width = sum(col_widths)
     
     # Table title
     if table_data.get("title"):
-        pdf.set_font("Helvetica", "B", 11)
-        if center_table:
-            # Center the title
-            title_width = pdf.get_string_width(table_data["title"])
-            pdf.set_x(pdf.l_margin + (pdf.w - 2 * pdf.l_margin - title_width) / 2)
-            pdf.cell(title_width, 8, table_data["title"], ln=True)
-        else:
-            pdf.cell(0, 8, table_data["title"], ln=True)
-        pdf.ln(2)
+        title_text = str(table_data.get("title", "")).strip()
+        if title_text:
+            pdf.set_font(font_name, "B", 11)
+            title_text = _encode_text_for_pdf(title_text)
+            if center_table:
+                # Center the title
+                title_width = pdf.get_string_width(title_text)
+                pdf.set_x(pdf.l_margin + (pdf.w - 2 * pdf.l_margin - title_width) / 2)
+                pdf.cell(title_width, 8, title_text, ln=True)
+            else:
+                pdf.cell(0, 8, title_text, ln=True)
+            pdf.ln(2)
     
     # Header row
-    pdf.set_font("Helvetica", "B", 9)
+    pdf.set_font(font_name, "B", 9)
     pdf.set_fill_color(230, 230, 230)
     # Calculate header row height based on content (text wrapping)
     max_header_height = 7  # Minimum header height
     header_cell_lines = []
     for i, col_header in enumerate(table_data["columns"]):
         if i < len(col_widths):
-            header_text = str(col_header) if col_header is not None else ""
-            # Ensure ASCII-compatible
-            try:
-                header_text.encode('latin-1')
-            except UnicodeEncodeError:
-                header_text = header_text.encode('ascii', 'replace').decode('ascii')
+            header_text = _encode_text_for_pdf(str(col_header) if col_header is not None else "")
             # Calculate height needed for header cell (with wrapping)
+            # fpdf2 handles UTF-8 automatically
             lines = pdf.multi_cell(col_widths[i], 7, header_text, border=0, align="L", split_only=True)
             header_cell_lines.append(lines)
             cell_height = len(lines) * 7
@@ -268,9 +390,13 @@ def _add_pdf_table(pdf, table_data: dict, col_widths: list[float] | None = None,
     pdf.set_xy(x_start, y_start + max_header_height)
     
     # Data rows
-    pdf.set_font("Helvetica", size=8)
+    pdf.set_font(font_name, size=8)
     pdf.set_fill_color(255, 255, 255)
     for row_idx, row in enumerate(rows):
+        # Skip empty rows
+        if not row or all(not cell or str(cell).strip() == "" for cell in row):
+            continue
+            
         # Alternate row colors for better readability
         if row_idx % 2 == 1:
             fill_color = (245, 245, 245)
@@ -282,12 +408,8 @@ def _add_pdf_table(pdf, table_data: dict, col_widths: list[float] | None = None,
         cell_lines_list = []
         for i, cell_value in enumerate(row):
             if i < len(col_widths):
-                cell_text = str(cell_value) if cell_value is not None else ""
-                # Ensure ASCII-compatible
-                try:
-                    cell_text.encode('latin-1')
-                except UnicodeEncodeError:
-                    cell_text = cell_text.encode('ascii', 'replace').decode('ascii')
+                cell_text = _encode_text_for_pdf(str(cell_value) if cell_value is not None else "")
+                # fpdf2 handles UTF-8 automatically - no need to convert
                 # Calculate height needed for this cell (with wrapping)
                 lines = pdf.multi_cell(col_widths[i], 6, cell_text, border=0, align="L", split_only=True)
                 cell_lines_list.append(lines)
@@ -304,7 +426,7 @@ def _add_pdf_table(pdf, table_data: dict, col_widths: list[float] | None = None,
             x_start = pdf.l_margin
             y_start = pdf.get_y()
             # Redraw header if table spans multiple pages
-            pdf.set_font("Helvetica", "B", 9)
+            pdf.set_font(font_name, "B", 9)
             pdf.set_fill_color(230, 230, 230)
             for i, col_header in enumerate(table_data["columns"]):
                 if i < len(col_widths):
@@ -316,7 +438,7 @@ def _add_pdf_table(pdf, table_data: dict, col_widths: list[float] | None = None,
                         pdf.set_xy(x_pos + 1, y_start + 1 + line_idx * 7)
                         pdf.cell(col_widths[i] - 2, 7, line, border=0, align="L", ln=0)
             y_start = y_start + max_header_height
-            pdf.set_font("Helvetica", size=8)
+            pdf.set_font(font_name, size=8)
         
         for i, cell_value in enumerate(row):
             if i < len(col_widths):
@@ -334,6 +456,67 @@ def _add_pdf_table(pdf, table_data: dict, col_widths: list[float] | None = None,
     pdf.ln(3)
 
 
+def _setup_unicode_font(pdf) -> str:
+    """Setup Unicode font for Cyrillic support. Returns font name to use."""
+    import platform
+    from pathlib import Path
+    
+    font_name = "unicode_font"
+    font_added = False
+    
+    # Try to find and add a Unicode font that supports Cyrillic
+    # Common locations for fonts on different systems
+    font_paths = []
+    
+    system = platform.system()
+    if system == "Darwin":  # macOS
+        font_paths.extend([
+            "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",  # Best choice for Cyrillic
+            "/Library/Fonts/Arial Unicode.ttf",
+            "/System/Library/Fonts/Supplemental/Arial.ttf",  # Fallback
+        ])
+    elif system == "Linux":
+        font_paths.extend([
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+        ])
+    elif system == "Windows":
+        font_paths.extend([
+            "C:/Windows/Fonts/arial.ttf",
+            "C:/Windows/Fonts/calibri.ttf",
+            "C:/Windows/Fonts/times.ttf",
+        ])
+    
+    # Try each font path
+    for font_path in font_paths:
+        try:
+            font_file = Path(font_path)
+            if font_file.exists():
+                # Try to add regular and bold variants
+                try:
+                    pdf.add_font(font_name, "", str(font_file), uni=True)
+                    # Try to add bold variant (may fail if font doesn't have bold)
+                    try:
+                        pdf.add_font(font_name, "B", str(font_file), uni=True)
+                    except Exception:
+                        # If bold variant fails, regular font will be used for bold too
+                        pass
+                    font_added = True
+                    break
+                except Exception as e:
+                    # Font file exists but can't be added (wrong format, etc.)
+                    continue
+        except Exception:
+            continue
+    
+    # If no system font found, return helvetica (will cause errors with Cyrillic)
+    if not font_added:
+        font_name = "helvetica"
+    
+    return font_name
+
+
 def _export_pdf_report(
     settings: Settings,
     tenant_name: str,
@@ -345,11 +528,17 @@ def _export_pdf_report(
     FPDF_cls = _load_fpdf()
     pdf_path = _build_pdf_path(settings, tenant_name, report_type, scan_dt)
     pdf = FPDF_cls()
+    
+    # Setup Unicode font for Cyrillic support
+    font_name = _setup_unicode_font(pdf)
+    
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
-    pdf.set_font("Helvetica", "B", 16)
+    
+    # Set font
+    pdf.set_font(font_name, "B", 16)
     pdf.cell(0, 10, title, ln=True)
-    pdf.set_font("Helvetica", size=12)
+    pdf.set_font(font_name, size=12)
     pdf.cell(0, 8, f"Tenant: {tenant_name}", ln=True)
     if isinstance(scan_dt, datetime):
         pdf.cell(0, 8, f"Scan started: {scan_dt.replace(microsecond=0).isoformat(sep=' ')}", ln=True)
@@ -359,27 +548,52 @@ def _export_pdf_report(
     for block in blocks:
         if not block:
             continue
+        
+        # Skip blocks with no content
+        rows = block.get("rows", [])
+        columns = block.get("columns", [])
+        
+        # Skip if no columns
+        if not columns:
+            continue
+        
+        # Skip empty blocks (no rows or all rows are empty)
+        if not rows:
+            # Allow empty blocks only for specific cases (like headers)
+            if not block.get("title"):
+                continue
+        
+        # Check if all rows are effectively empty
+        has_content = False
+        for row in rows:
+            if row and any(cell and str(cell).strip() for cell in row):
+                has_content = True
+                break
+        
+        if not has_content and rows:
+            continue
+        
         # Always add table, even if rows are empty (will show header)
-        if not block.get("rows") and block.get("columns"):
-            _add_pdf_table(pdf, block)
+        if not rows and columns:
+            _add_pdf_table(pdf, block, font_name=font_name)
             continue
 
         # Special handling for "Overall Risk" and "Last Scan" tables - make them 2x narrower
         if block.get("title", "").startswith("Overall Risk") or block.get("title", "").startswith("Last Scan"):
             page_width = pdf.w - 2 * pdf.l_margin
             table_width = page_width / 2
-            num_cols = len(block.get("columns", []))
+            num_cols = len(columns)
             if num_cols > 0:
                 col_width = table_width / num_cols
                 col_widths = [col_width] * num_cols
                 old_x = pdf.get_x()
                 pdf.set_x(pdf.l_margin + (page_width - table_width) / 2)
-                _add_pdf_table(pdf, block, col_widths=col_widths, center_table=True)
+                _add_pdf_table(pdf, block, col_widths=col_widths, center_table=True, font_name=font_name)
                 pdf.set_x(pdf.l_margin)
             else:
-                _add_pdf_table(pdf, block)
+                _add_pdf_table(pdf, block, font_name=font_name)
         else:
-            _add_pdf_table(pdf, block)
+            _add_pdf_table(pdf, block, font_name=font_name)
 
     pdf.output(str(pdf_path))
     return pdf_path
@@ -1177,6 +1391,205 @@ def show_nuclei_cmd(  # type: ignore[override]
             blocks=pdf_blocks,
         )
         console.print(f"PDF exported to {pdf_path}")
+
+
+def _finding_to_record(finding: NucleiFinding) -> NucleiFindingRecord:
+    """Convert NucleiFinding from database to NucleiFindingRecord for AI processing."""
+    references = []
+    if finding.references:
+        references = [ref.strip() for ref in finding.references.splitlines() if ref.strip()]
+    
+    tags = []
+    if finding.tags:
+        tags = [tag.strip() for tag in finding.tags.split(",") if tag.strip()]
+    
+    return NucleiFindingRecord(
+        target=finding.target or "",
+        template_id=finding.template_id,
+        template_name=finding.template_name,
+        severity=finding.severity,
+        description=finding.description,
+        evidence=finding.evidence,
+        references=references,
+        tags=tags,
+        matched_at=finding.matched_at,
+        matched_url=finding.matched_url,
+        host=finding.host.hostname if finding.host and finding.host.hostname else None,
+        ip=finding.host.ip if finding.host and finding.host.ip else None,
+        matcher_name=None,
+        raw={},
+    )
+
+
+@cli.command("ai-nuclei")
+@click.option("--tenant", required=True, help="Tenant name")
+@click.option("--pdf", is_flag=True, help="Export AI report to PDF")
+@click.pass_context
+def ai_nuclei_cmd(  # type: ignore[override]
+    ctx: click.Context,
+    tenant: str,
+    pdf: bool,
+) -> None:
+    """Generate AI summary for the latest nuclei scan of a tenant."""
+    settings: Settings = ctx.obj["settings"]
+    logger = ctx.obj.get("logger")
+    engine = create_sqlite_engine(settings.sqlite_path)
+    init_db(engine)
+
+    if not settings.ai_enabled or not settings.ai_api_url or not settings.ai_api_key:
+        console.print("AI is not enabled or configured. Please check settings.", style="red")
+        sys.exit(1)
+
+    with get_session(engine) as s:
+        tenant_obj = get_tenant_by_name(s, tenant)
+        if not tenant_obj:
+            console.print(f"Tenant '{tenant}' not found", style="red")
+            sys.exit(1)
+
+        # Get the latest nuclei scan for the tenant
+        scans = list_nuclei_scans(s, tenant=tenant_obj)
+        if not scans:
+            console.print("No nuclei scans found for the specified tenant", style="yellow")
+            sys.exit(1)
+        
+        nuclei_scan = scans[0]  # Most recent scan
+        
+        # Check if scan is completed
+        if nuclei_scan.status != "done":
+            console.print(f"Nuclei scan {nuclei_scan.id} is not completed (status: {nuclei_scan.status})", style="yellow")
+            sys.exit(1)
+        
+        # Get findings
+        findings_db = list_nuclei_findings(s, nuclei_scan)
+        if not findings_db:
+            console.print("No findings found for the latest nuclei scan", style="yellow")
+            sys.exit(1)
+        
+        # Convert findings to NucleiFindingRecord format
+        findings_records = [_finding_to_record(f) for f in findings_db]
+
+    if logger:
+        logger.info(
+            "AI Nuclei: Generating AI summary for tenant=%s nuclei_scan_id=%s findings=%d",
+            tenant,
+            nuclei_scan.id,
+            len(findings_records),
+        )
+
+    # Generate AI summary
+    console.print(f"Generating AI summary for nuclei scan {nuclei_scan.id}...", style="cyan")
+    ai_summary = _generate_ai_summary(settings, tenant, findings_records, logger)
+
+    if not ai_summary:
+        console.print("Failed to generate AI summary", style="red")
+        console.print("Please check the logs for details:", style="yellow")
+        console.print(f"  Log file: {settings.data_dir / 'activity.log'}", style="dim")
+        console.print("Common issues:", style="yellow")
+        console.print("  - AI API URL is incorrect or unreachable", style="dim")
+        console.print("  - AI API key is invalid", style="dim")
+        console.print("  - API endpoint returned an error", style="dim")
+        sys.exit(1)
+
+    # Update database with AI summary
+    with get_session(engine) as s:
+        nuclei_scan_db = s.get(NucleiScan, nuclei_scan.id)
+        if nuclei_scan_db:
+            update_nuclei_scan(s, nuclei_scan_db, ai_summary=ai_summary)
+            s.commit()
+
+    # Display AI summary
+    console.print()
+    console.print(Panel(ai_summary, title="AI Summary", expand=False))
+    console.print()
+
+    # Export to PDF if requested
+    if pdf:
+        pdf_blocks: list[dict] = []
+        
+        # Add metadata
+        meta_table = Table(title=f"AI Summary for Nuclei Scan {nuclei_scan.id}", width=CONSOLE_TABLE_WIDTH)
+        meta_table.add_column("Property")
+        meta_table.add_column("Value")
+        meta_rows = [
+            ("Tenant", tenant),
+            ("Nuclei Scan ID", str(nuclei_scan.id)),
+            ("Base Scan ID", str(nuclei_scan.scan_id) if nuclei_scan.scan_id else "N/A"),
+            ("Scan Started", _fmt_dt(nuclei_scan.started_at)),
+            ("Scan Finished", _fmt_dt(nuclei_scan.finished_at)),
+            ("Total Findings", str(len(findings_records))),
+            ("Generated At", datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")),
+        ]
+        for prop, value in meta_rows:
+            meta_table.add_row(prop, value)
+        pdf_blocks.append(
+            {
+                "title": f"AI Summary for Nuclei Scan {nuclei_scan.id}",
+                "columns": ["Property", "Value"],
+                "rows": [[prop, value] for prop, value in meta_rows],
+            }
+        )
+        
+        # Add AI summary - parse markdown tables and split into blocks
+        summary_blocks = _split_ai_summary_into_blocks(ai_summary)
+        
+        for idx, block in enumerate(summary_blocks):
+            if block["type"] == "text":
+                # Split long text into paragraphs for better formatting
+                content = block["content"]
+                # Split by double newlines or single newline if line is long
+                paragraphs = []
+                for para in content.split('\n\n'):
+                    para = para.strip()
+                    if para:
+                        # Further split very long paragraphs
+                        if len(para) > 500:
+                            # Split by single newlines or sentence boundaries
+                            lines = para.split('\n')
+                            current_para = []
+                            for line in lines:
+                                if len(' '.join(current_para + [line])) > 500:
+                                    if current_para:
+                                        paragraphs.append(' '.join(current_para))
+                                    current_para = [line]
+                                else:
+                                    current_para.append(line)
+                            if current_para:
+                                paragraphs.append(' '.join(current_para))
+                        else:
+                            paragraphs.append(para)
+                
+                # Add each paragraph as a separate text block
+                for para in paragraphs:
+                    if para.strip():
+                        pdf_blocks.append(
+                            {
+                                "title": "AI Summary" if idx == 0 else "",
+                                "columns": ["Content"],
+                                "rows": [[para]],
+                            }
+                        )
+            elif block["type"] == "table":
+                # Add parsed table
+                pdf_blocks.append(
+                    {
+                        "title": "AI Summary - Table",
+                        "columns": block["columns"],
+                        "rows": block["rows"],
+                    }
+                )
+        
+        pdf_path = _export_pdf_report(
+            settings=settings,
+            tenant_name=tenant,
+            report_type="nuclei_ai",
+            scan_dt=nuclei_scan.started_at,
+            title=f"AI Summary Report for {tenant}",
+            blocks=pdf_blocks,
+        )
+        console.print(f"PDF exported to {pdf_path}")
+        if logger:
+            logger.info("AI Nuclei PDF generated: tenant=%s path=%s", tenant, pdf_path)
+
 
 @cli.command()
 @click.option("--tenant", required=True, help="Tenant name")

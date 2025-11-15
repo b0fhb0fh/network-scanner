@@ -58,7 +58,7 @@ def _collect_targets(pairs: Sequence[tuple[Host, Service]]) -> list[str]:
     return targets
 
 
-def _generate_ai_summary(settings: Settings, tenant_name: str, findings: list[NucleiFindingRecord]) -> str | None:
+def _generate_ai_summary(settings: Settings, tenant_name: str, findings: list[NucleiFindingRecord], logger=None) -> str | None:
     if not settings.ai_enabled or not settings.ai_api_url or not settings.ai_api_key:
         return None
     if not findings:
@@ -105,17 +105,86 @@ def _generate_ai_summary(settings: Settings, tenant_name: str, findings: list[Nu
         "max_tokens": settings.ai_max_tokens,
     }
 
+    # Логирование запроса к AI API
+    if logger:
+        # Логируем запрос без чувствительных данных
+        safe_headers = {k: ("Bearer ***" if k.lower() == "authorization" else v) for k, v in headers.items()}
+        prompt_size_chars = len(prompt)
+        prompt_size_bytes = len(prompt.encode('utf-8'))
+        system_message_size = len(body["messages"][0]["content"])
+        total_message_size = sum(len(m["content"]) for m in body["messages"])
+        body_size_bytes = len(json.dumps(body, ensure_ascii=False).encode('utf-8'))
+        
+        logger.info(
+            "AI Summary Request: tenant=%s url=%s headers=%s model=%s findings_count=%d prompt_size_chars=%d prompt_size_bytes=%d total_message_size_chars=%d body_size_bytes=%d",
+            tenant_name,
+            settings.ai_api_url,
+            safe_headers,
+            settings.ai_model,
+            len(subset),
+            prompt_size_chars,
+            prompt_size_bytes,
+            total_message_size,
+            body_size_bytes,
+        )
+        logger.debug(
+            "AI Summary Request Details: system_message_size=%d user_message_size=%d",
+            system_message_size,
+            prompt_size_chars,
+        )
+        logger.debug(
+            "AI Summary Request Body: %s",
+            json.dumps({**body, "messages": [{"role": m["role"], "content": m["content"][:200] + "..." if len(m["content"]) > 200 else m["content"]} for m in body["messages"]]}, ensure_ascii=False),
+        )
+
     try:
         response = requests.post(settings.ai_api_url, headers=headers, json=body, timeout=60)
         response.raise_for_status()
         data = response.json()
+        
+        # Логирование ответа от AI API
+        if logger:
+            logger.info(
+                "AI Summary Response: tenant=%s status_code=%d response_size=%d",
+                tenant_name,
+                response.status_code,
+                len(response.text) if response.text else 0,
+            )
+            # Логируем полный ответ (может быть большим, но это важно для отладки)
+            logger.debug("AI Summary Response Data: %s", json.dumps(data, ensure_ascii=False, indent=2))
+        
         choices = data.get("choices")
         if isinstance(choices, list) and choices:
             message = choices[0].get("message") or {}
             content = message.get("content")
             if isinstance(content, str):
-                return content.strip()
-    except Exception:
+                summary = content.strip()
+                if logger:
+                    logger.info(
+                        "AI Summary Generated: tenant=%s summary_length=%d",
+                        tenant_name,
+                        len(summary),
+                    )
+                    logger.debug("AI Summary Content: %s", summary)
+                return summary
+    except requests.exceptions.RequestException as e:
+        if logger:
+            logger.error(
+                "AI Summary Generation Failed (Request Error): tenant=%s error=%s url=%s",
+                tenant_name,
+                str(e),
+                settings.ai_api_url,
+                exc_info=True,
+            )
+        return None
+    except Exception as e:
+        if logger:
+            logger.error(
+                "AI Summary Generation Failed (Unexpected Error): tenant=%s error=%s",
+                tenant_name,
+                str(e),
+                exc_info=True,
+            )
         return None
     return None
 
@@ -304,7 +373,7 @@ def run_nuclei_scan_for_scan(
     status = "done" if overall_success else "failed"
     summary: str | None = None
     if status == "done" and all_records and settings.ai_enabled:
-        summary = _generate_ai_summary(settings, tenant_name, all_records)
+        summary = _generate_ai_summary(settings, tenant_name, all_records, logger)
 
     with get_session(engine) as session:
         nuclei_scan_db = session.get(NucleiScan, nuclei_scan_id)
